@@ -35,6 +35,8 @@
     "action": "ALERT",
     "protocol": "TCP",
     "content": "SSH-",
+    "offset": 0,
+    "depth": 16,
     "nocase": false,
     "severity": "LOW",
     "priority": 3,

@@ -62,7 +62,7 @@ class UdpScanRegressionTests(unittest.TestCase):
 
 class StealthScanRegressionTests(unittest.TestCase):
     def test_flag_based_scan_classes_are_isolated_and_evidence_backed(self):
-        for flags, scan_class in (("F", "fin"), ("", "null"), ("FPU", "xmas"), ("FA", "maimon")):
+        for flags, scan_class in (("F", "fin"), ("", "null"), ("FPU", "xmas")):
             recorder = RecordingAlerts()
             engine = DetectionEngine.__new__(DetectionEngine)
             engine.analyze_packet = lambda packet: []
@@ -73,6 +73,29 @@ class StealthScanRegressionTests(unittest.TestCase):
                                      "tcp_flags": flags, "length": 60, "payload": b""})
             self.assertEqual(len(recorder.alerts), 1)
             self.assertIn(f"probe_class={scan_class}", recorder.alerts[0]["evidence"])
+
+    def test_ack_and_maimon_normal_traffic_do_not_cross_correlate(self):
+        recorder = RecordingAlerts()
+        engine = DetectionEngine.__new__(DetectionEngine)
+        engine.analyze_packet = lambda packet: []
+        core = DeltaCore(recorder, engine, port_threshold=3)
+        # Ordinary ACK and FIN+ACK packets are separate classes and neither
+        # becomes a scan merely because unrelated reverse traffic exists.
+        for port in (21, 22, 23):
+            core.process_packet({"src_ip": "85.210.193.152", "dst_ip": "10.35.194.126",
+                                 "protocol": "TCP", "src_port": 40000, "dst_port": port,
+                                 "tcp_flags": "A", "length": 60, "payload": b""})
+            core.process_packet({"src_ip": "85.210.193.152", "dst_ip": "10.35.194.126",
+                                 "protocol": "TCP", "src_port": 40001, "dst_port": port,
+                                 "tcp_flags": "FA", "length": 60, "payload": b""})
+        for port in (21, 22, 23):
+            core.process_packet({"src_ip": "10.35.194.126", "dst_ip": "85.210.193.152",
+                                 "protocol": "TCP", "src_port": port, "dst_port": 40000,
+                                 "tcp_flags": "R", "length": 40, "payload": b""})
+            core.process_packet({"src_ip": "10.35.194.126", "dst_ip": "85.210.193.152",
+                                 "protocol": "TCP", "src_port": port, "dst_port": 40001,
+                                 "tcp_flags": "R", "length": 40, "payload": b""})
+        self.assertEqual(recorder.alerts, [])
 
     def test_ack_scan_requires_reverse_rst_evidence(self):
         recorder = RecordingAlerts()
@@ -104,6 +127,61 @@ class StealthScanRegressionTests(unittest.TestCase):
         self.assertNotEqual(recorder.alerts[0]["event_id"], recorder.alerts[1]["event_id"])
 
 
+class SshBannerRuleTests(unittest.TestCase):
+    """SID 1000003 ("SSH protocol banner observed") must never turn normal
+    SSH into an alert storm: the rule is anchored to the payload start and
+    banner exchanges on standard SSH ports are suppressed entirely.
+    """
+
+    def _packet(self, src, sport, dst, dport, payload, t, flags="PA"):
+        return {"src_ip": src, "src_port": sport, "dst_ip": dst, "dst_port": dport,
+                "protocol": "TCP", "tcp_flags": flags, "payload": payload,
+                "length": 60 + len(payload), "tcp_sequence": 1, "tcp_acknowledgment": 2,
+                "icmp_type": None, "icmp_code": None, "details": {}, "_monotonic": t}
+
+    def _ssh_connection(self, client, sport, server, dport, t):
+        return [
+            self._packet(client, sport, server, dport, b"", t, flags="S"),
+            self._packet(server, dport, client, sport, b"", t + 0.01, flags="SA"),
+            self._packet(client, sport, server, dport, b"", t + 0.02, flags="A"),
+            self._packet(client, sport, server, dport, b"SSH-2.0-OpenSSH_9.0p1 Kali\r\n", t + 0.03),
+            self._packet(server, dport, client, sport, b"SSH-2.0-OpenSSH_8.9p1 Ubuntu\r\n", t + 0.04),
+            self._packet(client, sport, server, dport, b"", t + 0.05, flags="FA"),
+        ]
+
+    def test_banner_rule_is_anchored_to_payload_start(self):
+        engine = DetectionEngine("rules/rules.json")
+        at_start = self._packet("192.0.2.10", 40000, "198.51.100.10", 22,
+                                b"SSH-2.0-OpenSSH_9.0p1\r\n", 1.0)
+        self.assertEqual([alert["sid"] for alert in engine.analyze_packet(at_start)], [1000003])
+        # "SSH-" buried past the anchor depth (web page text, chat, ...) must
+        # not match the banner rule.
+        mid_payload = self._packet("192.0.2.10", 40000, "198.51.100.10", 80,
+                                   b"GET /blog/ssh-tips HTTP/1.1\r\nHost: x\r\n... SSH-2.0 mention\r\n", 1.0)
+        self.assertEqual(engine.analyze_packet(mid_payload), [])
+
+    def test_normal_ssh_on_standard_port_does_not_alert(self):
+        recorder = RecordingAlerts()
+        core = DeltaCore(recorder, DetectionEngine("rules/rules.json"))
+        for packet in self._ssh_connection("192.168.68.119", 40001, "192.168.68.118", 22, 1.0):
+            core.process_packet(packet)
+        self.assertEqual(recorder.alerts, [])
+
+    def test_non_standard_port_ssh_banner_is_one_unique_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = AlertManager(str(Path(directory) / "alerts.sqlite"), terminal=False, persist=True)
+            core = DeltaCore(manager, DetectionEngine("rules/rules.json"))
+            for sport, start in ((40001, 1.0), (40002, 5.0)):
+                for packet in self._ssh_connection("192.168.68.119", sport, "192.168.68.118", 2200, start):
+                    core.process_packet(packet)
+            from database.models import Alert
+            rows = manager.session.query(Alert).filter(Alert.sid == 1000003).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].occurrence_count, 2)
+            self.assertEqual(rows[0].destination_port, 2200)
+            manager.close()
+
+
 class DetectionEngineSafetyTests(unittest.TestCase):
     def test_alerts_from_same_source_are_not_permanently_suppressed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,6 +196,25 @@ class DetectionEngineSafetyTests(unittest.TestCase):
             from database.models import Alert
             self.assertEqual(manager.session.query(Alert).count(), 3)
             self.assertEqual(len(manager.get_recent_alerts()), 3)
+            manager.close()
+
+    def test_recurring_per_packet_events_merge_into_one_unique_alert(self):
+        # Signature events without an explicit event_id (e.g. SSH banner
+        # observation on every connection) must collapse into one unique alert
+        # row whose occurrence_count grows -- never a row per packet or per
+        # connection.
+        with tempfile.TemporaryDirectory() as directory:
+            manager = AlertManager(str(Path(directory) / "alerts.sqlite"), terminal=False, persist=True)
+            base = {"src_ip": "192.168.68.119", "dst_ip": "192.168.68.118", "protocol": "TCP",
+                    "dst_port": 22, "sid": 1000003, "severity": "Low",
+                    "message": "SSH protocol banner observed"}
+            for src_port in (40001, 40002, 40003, 40004):
+                manager.log_alert({**base, "src_port": src_port})
+            from database.models import Alert
+            rows = manager.session.query(Alert).filter(Alert.sid == 1000003).all()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].occurrence_count, 4)
+            self.assertEqual(len(manager.get_recent_alerts()), 1)
             manager.close()
 
     def test_configured_rules_match_representative_payload(self):

@@ -1,16 +1,19 @@
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from scapy.all import Ether, IP, IPv6, TCP, UDP, ICMP, ICMPv6EchoRequest, Raw
 
-from core.alert_manager import AlertManager
+from core.alert_manager import AlertManager, format_human_alert
 from core.delta_core import DeltaCore
 from core.packet_capture import PacketCapture, _raw_ip_to_info, packet_to_info
 from core.detection_engine import DetectionEngine
+from database.models import Statistic
 from main import build_parser
 from run_project import parser as project_parser
 
@@ -31,6 +34,27 @@ class RecordingAlerts:
 
 
 class PacketNormalizationTests(unittest.TestCase):
+    @unittest.skip("IPv6 is intentionally disabled")
+    def test_endpoint_identity_separates_ipv6_ports_and_excludes_macs(self):
+        packet = packet_to_info(Ether(src="aa:bb:cc:dd:ee:ff", dst="00:11:22:33:44:55") /
+                                IPv6(src="2401:4900:ccc4:cfa6:19b0:166f:c1a9:f86c",
+                                     dst="2606:4700:83b2:7cbc:c2fe:9c1:5ff2:75c4") /
+                                TCP(sport=12809, dport=443))
+        self.assertEqual(packet["src_ip"], "2401:4900:ccc4:cfa6:19b0:166f:c1a9:f86c")
+        self.assertEqual(packet["dst_ip"], "2606:4700:83b2:7cbc:c2fe:9c1:5ff2:75c4")
+        self.assertEqual((packet["src_port"], packet["dst_port"]), (12809, 443))
+        self.assertEqual(packet["source"], "[2401:4900:ccc4:cfa6:19b0:166f:c1a9:f86c]:12809")
+        self.assertEqual(packet["destination"], "[2606:4700:83b2:7cbc:c2fe:9c1:5ff2:75c4]:443")
+        self.assertNotIn("AA:BB:CC:DD:EE:FF", packet.values())
+
+    @unittest.skip("IPv6 is intentionally disabled")
+    def test_human_alert_formats_ipv6_with_brackets(self):
+        output = format_human_alert(1, {"src_ip": "2001:db8::1", "src_port": 12809,
+                                       "dst_ip": "2001:db8::2", "dst_port": 443,
+                                       "protocol": "TCP", "sid": 1, "message": "test"}, "LOW")
+        self.assertIn("[2001:db8::1]:12809 -> [2001:db8::2]:443", output)
+
+    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_extension_header_transport_is_decoded(self):
         from scapy.all import IPv6ExtHdrHopByHop
         packet = Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / IPv6ExtHdrHopByHop() / TCP(sport=40000, dport=443, flags="S")
@@ -39,6 +63,14 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual(info["protocol"], "TCP")
         self.assertEqual(info["src_port"], 40000)
         self.assertEqual(info["dst_port"], 443)
+
+    def test_normalized_user_details_exclude_mac_addresses(self):
+        packet = packet_to_info(Ether(src="aa:bb:cc:dd:ee:ff", dst="11:22:33:44:55:66") /
+                                IP(src="192.0.2.1", dst="198.51.100.1") /
+                                TCP(sport=40000, dport=443, flags="A"))
+        self.assertEqual((packet["src_ip"], packet["dst_ip"]), ("192.0.2.1", "198.51.100.1"))
+        self.assertNotIn("src_mac", packet["details"])
+        self.assertNotIn("dst_mac", packet["details"])
 
     def test_tcp_udp_icmp_and_non_ip(self):
         tcp = packet_to_info(Ether() / IP(src="192.0.2.1", dst="198.51.100.1") /
@@ -56,6 +88,11 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual((icmp["protocol"], icmp["icmp_type"], icmp["icmp_code"]), ("ICMP", 8, 0))
         self.assertIsNone(packet_to_info(Ether() / b"arp"))
 
+    def test_ipv6_packets_are_ignored_for_ipv4_only_capture(self):
+        self.assertIsNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / TCP(sport=40000, dport=443, flags="S")))
+        self.assertIsNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=40000, dport=53)))
+
+    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_tcp_and_udp_normalize_for_active_pipeline(self):
         tcp = packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") /
                              TCP(sport=40000, dport=443, flags="S"))
@@ -65,6 +102,7 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual((udp["protocol"], udp["src_port"], udp["dst_port"], udp["payload"]),
                          ("UDP", 53000, 53, b"dns6"))
 
+    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_echo_request_normalizes_for_active_pipeline(self):
         packet = packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") /
                                 ICMPv6EchoRequest(id=7, seq=3) / Raw(b"ping6"))
@@ -73,6 +111,7 @@ class PacketNormalizationTests(unittest.TestCase):
                          ("ICMPv6", "2001:db8::1", 128))
         self.assertEqual(packet["payload"], b"ping6")
 
+    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_icmp_error_preserves_quoted_udp_probe(self):
         from scapy.all import ICMPv6DestUnreach
         packet = packet_to_info(Ether() / IPv6(src="2001:db8::2", dst="2001:db8::1") /
@@ -385,7 +424,9 @@ class PersistenceAndConfigTests(unittest.TestCase):
             traffic_id = manager.log_traffic(packet)
             manager.log_alert({**packet, "sid": 42, "gid": 1, "revision": 2, "message": "test"})
             self.assertEqual(traffic_id, 1)
+            row = manager.session.query(__import__("database.models", fromlist=["TrafficLog"]).TrafficLog).one()
             self.assertEqual(manager.session.query(__import__("database.models", fromlist=["TrafficLog"]).TrafficLog).count(), 1)
+            self.assertNotIn("mac", row.details.lower())
             self.assertEqual(manager.session.query(__import__("database.models", fromlist=["Alert"]).Alert).count(), 1)
             manager.close()
 
@@ -429,6 +470,71 @@ class PersistenceAndConfigTests(unittest.TestCase):
                 DetectionEngine(path)
         finally:
             os.unlink(path)
+
+
+class DatabaseConcurrencyTests(unittest.TestCase):
+    """The dashboard re-reads the shared SQLite file on every rules request
+    while the capture process writes continuously. These tests pin the
+    concurrency contract that keeps "database is locked" away.
+    """
+
+    def test_statistic_upsert_keeps_one_row_per_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = AlertManager(str(Path(directory) / "nids.sqlite"), terminal=False, persist=True)
+            try:
+                for value in (10, 20, 30):
+                    manager._upsert_statistic("packets_processed", value)
+                rows = manager.session.query(Statistic).filter_by(name="packets_processed").all()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0].value, 30)
+            finally:
+                manager.close()
+
+    def test_capture_thread_statistics_do_not_share_the_session_cross_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = AlertManager(str(Path(directory) / "nids.sqlite"), terminal=False, persist=True)
+            try:
+                manager._upsert_statistic("packets_processed", 7)
+
+                def simulate_capture_thread():
+                    manager._upsert_statistic("packets_processed", 99)
+
+                thread = threading.Thread(target=simulate_capture_thread)
+                thread.start()
+                thread.join()
+                row = manager.session.query(Statistic).filter_by(name="packets_processed").one()
+                self.assertEqual(row.value, 7)
+            finally:
+                manager.close()
+
+    def test_rules_endpoint_with_active_writer_never_locks(self):
+        import dashboard.app as dashboard_app
+        original_db_path = dashboard_app.DB_PATH
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = str(Path(directory) / "shared.sqlite")
+            dashboard_app.DB_PATH = db_path
+            manager = AlertManager(db_path, terminal=False, persist=True)
+            stop = threading.Event()
+
+            def writer():
+                while not stop.is_set():
+                    manager.log_traffic({"src_ip": "192.0.2.1", "dst_ip": "198.51.100.1",
+                                         "protocol": "TCP", "src_port": 40000,
+                                         "dst_port": 80, "length": 60})
+                    time.sleep(0.001)
+
+            thread = threading.Thread(target=writer, daemon=True)
+            thread.start()
+            try:
+                client = dashboard_app.app.test_client()
+                for _ in range(20):
+                    response = client.get("/api/rules?page=1&page_size=50")
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+                manager.close()
+                dashboard_app.DB_PATH = original_db_path
 
 
 if __name__ == "__main__":

@@ -238,7 +238,20 @@ class DetectionEngine:
                 content = item["content"]
                 content_values = item.get("contents", [content])
                 haystack = raw_payload.lower() if item["nocase"] else raw_payload
-                if any(value and (value.lower() if item["nocase"] else value) not in haystack
+                # Snort-style content anchoring: `offset` starts the search at
+                # a fixed byte index and `depth` bounds how many bytes of the
+                # payload are searched from there. Rules without either keep
+                # the historical whole-payload substring semantics.
+                try:
+                    offset = int(rule.get("offset", 0) or 0)
+                    depth_value = rule.get("depth")
+                    depth = int(depth_value) if depth_value is not None else None
+                except (TypeError, ValueError):
+                    offset, depth = 0, None
+                if offset > len(haystack):
+                    continue
+                window = haystack[offset:] if depth is None else haystack[offset:offset + depth]
+                if any(value and (value.lower() if item["nocase"] else value) not in window
                        for value in content_values):
                     continue
                 if item["regex"] and not item["regex"].search(raw_payload):

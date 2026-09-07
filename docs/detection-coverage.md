@@ -19,6 +19,7 @@ sliding windows:
 | 90004 | DNS query-rate anomaly | High outbound DNS query volume from one source (replies excluded) | Medium | Emitted only above the per-window query threshold |
 | 90005 | Repeated connection failures | RST/FIN closures toward one service endpoint; the passive analogue of brute-force-like behavior | Medium | Per (source, target, port) key, threshold-gated |
 | 90006 | Invalid TCP flag combination | SYN+FIN and other RFC-invalid combinations | Low | Objective protocol violation |
+| 90014 | SYN flood | Bare half-open SYN attempts toward one service endpoint; never counts completed handshakes, SYN-ACK replies, or teardown traffic | High | Per (source, target, port) key, threshold-gated within the sliding window |
 
 Rule (signature) detection is provided by the configured `rules/rules.json`
 plus runtime rules added through the Rules tab (content/pcre conditions on
@@ -49,6 +50,7 @@ only; see the note at the end).
 | HTTP path traversal (content rule) | Signature alert | 1/1 | Yes (700001) | None | PASS |
 | Repeated connection failures (brute-force-like) | Repeated RST/FIN closures | 32/32 | Yes (90005) | None | PASS |
 | Invalid TCP flag combination (SYN+FIN) | Protocol anomaly | 1/1 | Yes (90006) | None | PASS |
+| TCP SYN flood (half-open attempts at one endpoint) | High rate of bare half-open SYN attempts toward one service | 100/100 | Yes (90014) | None | PASS |
 | Normal traffic (negatives) | No alerts | 5/5 | No | None | PASS |
 | Internet browsing to public destinations (negatives) | No host-discovery sweep for ordinary client egress | 3/3 | No | None | PASS |
 | Gateway neighbor ARP resolution (negatives) | No host-discovery sweep, ever: ARP is excluded from sweep correlation | 3/3 | No | None | PASS |
@@ -146,6 +148,7 @@ passive UDP-scan correlation.
 | TCP scanning | Maimon | TCP | FIN+ACK probes to multiple ports | Supported | Medium/high; ACK semantics are ambiguous | Replay FIN+ACK packets |
 | TCP scanning | ACK / window | TCP | ACK-only probes across ports plus response evidence | Supported (possible scan, requires responses) | High without response correlation | Offline matrix, ACK row |
 | TCP anomalies | Invalid flags (SYN+FIN) | TCP | Invalid flag combinations | Supported (SID 90006) | Low; objectively invalid per RFC 793 | Offline matrix, anomaly row |
+| DoS/flooding | TCP SYN flood | TCP | High rate of bare half-open SYN attempts from one source toward one service endpoint | Supported (SID 90014) | Low; only bare SYN packets count, so completed handshakes and normal client traffic never accumulate | Offline matrix, SYN flood row |
 | UDP scanning | UDP port scan | UDP | Distinct outbound UDP destination ports | Supported | Medium; service discovery can look identical | Offline matrix, UDP row |
 | UDP scanning | Closed-port inference | ICMP/ICMPv6+UDP | Quoted-error headers carry the original UDP probe | Supported when quoted headers are captured; IPv6 coverage narrower than IPv4 | Medium | Replay ICMP type 3 / ICMPv6 type 1/3 with quoted UDP |
 | Service discovery | Version/banner probing | TCP/UDP | Application payload, banners, protocol metadata | Signature/protocol inspection dependent | Medium | Replay protocol-specific test PCAP |

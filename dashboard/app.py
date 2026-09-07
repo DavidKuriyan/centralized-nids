@@ -9,6 +9,7 @@ import time
 from flask import Flask, jsonify, render_template, request, Response
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from sqlalchemy.exc import DBAPIError
 
 from core.detection_engine import DetectionEngine
 from core.rule_management import (RuleValidationError, generate_rule_text, parse_rule_text,
@@ -20,6 +21,17 @@ PROJECT_ROOT = ROOT.parent
 app = Flask(__name__, static_folder=str(ROOT / "static"), template_folder=str(ROOT / "templates"))
 API_URL = os.environ.get("DELTA_NIDS_API_URL", "http://127.0.0.1:8080").rstrip("/")
 DB_PATH = os.environ.get("DELTA_NIDS_DB_PATH", str(PROJECT_ROOT / "database" / "nids.db"))
+
+
+@app.errorhandler(DBAPIError)
+def _database_busy(error):
+    """Report transient database contention instead of a stack-trace 500.
+
+    WAL mode plus busy timeouts make lock collisions rare; if one still
+    surfaces (for example during a heavy export), the client can simply
+    retry, so report it as service unavailable.
+    """
+    return jsonify({"error": "database is busy; retry shortly"}), 503
 
 
 def _rule_payload(rule: Rule) -> dict:

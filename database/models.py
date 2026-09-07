@@ -3,9 +3,11 @@ from __future__ import annotations
 import datetime
 import os
 import pathlib
+import sqlite3
 
-from sqlalchemy import Boolean, Column, Integer, String, Text, create_engine
+from sqlalchemy import Boolean, Column, Integer, String, Text, UniqueConstraint, create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 
 Base = declarative_base()
 
@@ -106,6 +108,10 @@ class Statistic(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(Integer)
+    # The capture hot loop upserts one current row per counter name (see
+    # idx_statistics_name in _migrate_existing_tables) instead of appending
+    # history rows, keeping write volume -- and lock contention with the
+    # dashboard/API -- bounded.
     name = Column(String(100))
     value = Column(Integer)
     text_value = Column(Text)
@@ -145,18 +151,72 @@ _MIGRATIONS = (
 
 def _migrate_existing_tables(engine) -> None:
     """Add columns introduced after the first release without touching existing data."""
-    from sqlalchemy import text
-
     with engine.connect() as connection:
         for table, column, definition in _MIGRATIONS:
             rows = connection.execute(text(f"PRAGMA table_info({table})")).fetchall()
             if rows and all(row[1] != column for row in rows):
                 connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
                 connection.commit()
+        # Counters moved from append-only history to one row per name. Older
+        # databases hold many rows per name, so deduplicate (keeping the most
+        # recent) before the unique index required by the upsert can be built.
+        indexes = connection.execute(text("PRAGMA index_list(statistics)")).fetchall()
+        if all(row[1] != "idx_statistics_name" for row in indexes):
+            connection.execute(text(
+                "DELETE FROM statistics WHERE id NOT IN "
+                "(SELECT MAX(id) FROM statistics GROUP BY name)"
+            ))
+            connection.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_statistics_name ON statistics(name)"
+            ))
+            connection.commit()
+
+
+_ENGINES: dict[str, tuple] = {}
+_INITIALIZED: set[str] = set()
+
+
+def _configure_sqlite_engine(engine) -> None:
+    """Make concurrent multi-process, multi-thread access safe.
+
+    The NIDS capture process, the C++ REST API, and the dashboard all open the
+    same database file. With the default rollback journal and no busy
+    timeout, the capture thread's per-packet writes and the dashboard's
+    schema introspection collide into "database is locked". WAL mode lets
+    readers proceed during writes and a busy timeout makes writers queue
+    instead of failing.
+
+    NullPool plus ``check_same_thread=False`` gives every session its own
+    connection that may be used from whatever thread holds it (the heartbeat
+    thread, Flask request workers, the Windows raw-socket capture thread);
+    callers serialize shared sessions through their own locks.
+    """
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA busy_timeout=10000")
+            try:
+                # WAL is persistent per database file; once enabled for the
+                # file, every other process (C++ API included) benefits. A
+                # transient failure only delays the upgrade.
+                cursor.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 
 
 def init_db(db_path="nids.db"):
-    """Create/open the schema shared with the C++ REST API."""
+    """Create/open the schema shared with the C++ REST API.
+
+    Engines are cached per database path and schema creation/migration runs
+    once per process, so request handlers no longer re-reflect the schema on
+    every call.
+    """
     database = pathlib.Path(db_path).expanduser().resolve()
     parent = database.parent
     parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +224,20 @@ def init_db(db_path="nids.db"):
         raise PermissionError(f"database is not writable: {database}; repair ownership or permissions")
     if not os.access(parent, os.W_OK):
         raise PermissionError(f"database directory is not writable: {parent}; repair ownership or permissions")
-    engine = create_engine(f"sqlite:///{database}", future=True)
-    Base.metadata.create_all(engine)
-    _migrate_existing_tables(engine)
-    return sessionmaker(bind=engine, future=True)()
+    key = str(database)
+    cached = _ENGINES.get(key)
+    if cached is None:
+        engine = create_engine(
+            f"sqlite:///{database}", future=True,
+            connect_args={"timeout": 10.0, "check_same_thread": False},
+            poolclass=NullPool,
+        )
+        _configure_sqlite_engine(engine)
+        cached = (engine, sessionmaker(bind=engine, future=True))
+        _ENGINES[key] = cached
+    engine, factory = cached
+    if key not in _INITIALIZED:
+        Base.metadata.create_all(engine)
+        _migrate_existing_tables(engine)
+        _INITIALIZED.add(key)
+    return factory()

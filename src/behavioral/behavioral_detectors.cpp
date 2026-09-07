@@ -189,16 +189,27 @@ public:
         : config_(config), type_(type), service_(std::move(service)) {}
     void observe(const packet::Packet& packet, const flow::Flow& flow, std::vector<BehavioralEvent>& events) override {
         if (packet.transport != packet::TransportProtocol::tcp || !packet.tcp) return;
-        if (type_ == BehavioralType::brute_force && flow.service != service_) return;
         const bool failed = (packet.tcp->flags & 0x04U) != 0 || (packet.tcp->flags & 0x01U) != 0;
-        if (type_ == BehavioralType::brute_force && !failed) return;
+        if (type_ == BehavioralType::brute_force) {
+            if (flow.service != service_) return;
+            // A brute-force campaign opens a new TCP connection per
+            // authentication attempt (banner exchange + auth round-trip); each
+            // plain SYN toward the SSH service is one observable attempt. Bare
+            // RST/FIN closures additionally count as aborted attempts.
+            const bool new_connection = (packet.tcp->flags & 0x02U) != 0 &&
+                                        (packet.tcp->flags & 0x10U) == 0 &&
+                                        (packet.tcp->flags & 0x04U) == 0;
+            if (!failed && !new_connection) return;
+        } else if (!failed) {
+            return;
+        }
         const auto key = ip_string(packet.source) + ":" + ip_string(packet.destination) + ":" + std::to_string(packet.destination_port.value_or(0));
         auto& state = states_[key];
         state.add(packet.timestamp_seconds, config_.window_seconds);
         if (state.times.size() >= (type_ == BehavioralType::brute_force ? config_.brute_force_threshold : config_.connection_flood_threshold) && !state.emitted) {
             state.emitted = true;
             events.push_back({type_, packet.timestamp_seconds, flow.id, ip_string(packet.source), ip_string(packet.destination), "TCP",
-                              type_ == BehavioralType::brute_force ? "repeated authentication-like connection failures" : "connection flood pattern",
+                              type_ == BehavioralType::brute_force ? "repeated SSH authentication attempts" : "connection flood pattern",
                               "observed " + std::to_string(state.times.size()) + " qualifying TCP events within the configured window", 75});
         }
     }

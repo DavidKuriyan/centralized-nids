@@ -58,7 +58,9 @@ json alert_json(const alert::Alert& value) {
     return {{"id",value.id},{"first_seen",value.first_seen},{"last_seen",value.last_seen},{"timestamp",value.last_seen},{"occurrence_count",value.occurrence_count},{"suppressed_count",value.suppressed_count},{"severity",alert::severity_name(value.severity)},{"confidence",value.confidence / 100.0},{"risk",value.risk},{"gid",value.gid},{"sid",value.sid},{"revision",value.revision},{"source_ip",value.source_ip},{"source_port",value.source_port},{"destination_ip",value.destination_ip},{"destination_port",value.destination_port},{"protocol",value.protocol},{"service",value.service},{"flow_id",value.flow_id},{"traffic_id",value.traffic_id},{"message",value.message},{"evidence",value.evidence},{"explanation",value.explanation}};
 }
 json traffic_json(const storage::TrafficRecord& value) {
-    return {{"id",value.id},{"timestamp",value.timestamp},{"src_ip",value.src_ip},{"src_port",value.src_port},{"dst_ip",value.dst_ip},{"dst_port",value.dst_port},{"protocol",value.protocol},{"length",value.length},{"payload_summary",value.payload_summary},{"details",value.details}};
+    // Network endpoint identity is always IP-based. Ethernet addresses are
+    // intentionally absent from the normal traffic API contract.
+    return {{"id",value.id},{"timestamp",value.timestamp},{"src_ip",value.src_ip},{"src_port",value.src_port},{"dst_ip",value.dst_ip},{"dst_port",value.dst_port},{"protocol",value.protocol},{"length",value.length},{"payload_summary",value.payload_summary}};
 }
 
 bool parse_size(std::string_view text, std::size_t& output) {

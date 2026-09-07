@@ -85,6 +85,22 @@ int main() {
         }
     }
 
+    // A real brute-force campaign (one new TCP connection per attempt) is a
+    // series of plain SYNs toward the SSH service, not bare RST/FIN packets.
+    BehavioralManager ssh_syn_manager(config);
+    delta_nids::flow::Flow ssh_syn_flow;
+    ssh_syn_flow.id = 7;
+    ssh_syn_flow.service = "SSH";
+    for (std::int64_t t = 1; t <= 3; ++t) {
+        auto ssh_syn_pkt = packet(1, 2, 22, t, 0x02); // plain SYN flag
+        auto ssh_syn_events = ssh_syn_manager.observe(ssh_syn_pkt, ssh_syn_flow);
+        if (t == 3) {
+            bool found_ssh_syn = false;
+            for (const auto& event : ssh_syn_events) found_ssh_syn |= event.type == BehavioralType::brute_force;
+            assert(found_ssh_syn);
+        }
+    }
+
     // Test Connection flood detection (repeated connections to same target)
     BehavioralManager flood_manager(config);
     delta_nids::flow::Flow generic_flow;

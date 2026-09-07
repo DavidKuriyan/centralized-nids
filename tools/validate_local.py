@@ -156,6 +156,13 @@ def tcp_anomaly_syn_fin():
     return [_ip() / TCP(sport=43000, dport=443, seq=99, flags="SF")]
 
 
+def syn_flood_pattern(attempts: int = 100, port: int = 8080):
+    """SYN-flood wire pattern: bare half-open SYNs from one source to one
+    service endpoint, distinct source ports, no handshake completion."""
+    return [_ip() / TCP(sport=46000 + index, dport=port, seq=index, flags="S")
+            for index in range(attempts)]
+
+
 def normal_traffic():
     return [
         _ip() / TCP(sport=45000, dport=443, flags="S"),
@@ -311,6 +318,9 @@ def build_matrix() -> list[dict]:
          "packets": brute_force_pattern, "expected_sids": [90005]},
         {"name": "Invalid TCP flag combination (SYN+FIN)", "expected": "Protocol anomaly for invalid flags",
          "packets": tcp_anomaly_syn_fin, "expected_sids": [90006]},
+        {"name": "TCP SYN flood (half-open attempts at one endpoint)", "expected": "High rate of bare half-open SYN attempts toward one service",
+         "packets": syn_flood_pattern, "expected_sids": [90014],
+         "assert_evidence": ["half_open_syn_attempts=100"]},
         {"name": "Masscan-style SYN sweep (full port range, random src ports)", "expected": "SYN port scan; evidence stays bounded at full-port scale",
          "packets": lambda: masscan_style_syn_sweep(range(2001, 2201)), "expected_sids": [90003],
          "port_threshold": 150,

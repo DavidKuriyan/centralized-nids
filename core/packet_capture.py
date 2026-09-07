@@ -18,6 +18,16 @@ from scapy.all import ARP, Ether, IP, ICMP, IPv6, IPv6ExtHdrHopByHop, IPv6ExtHdr
 
 logger = logging.getLogger("delta-ids.capture")
 
+
+def _format_endpoint(ip: str | None, port: int | None) -> str:
+    """Format an IP endpoint without ambiguously concatenating IPv6 colons."""
+    if not ip:
+        return "-"
+    value = str(ip)
+    if port is None:
+        return value
+    return f"[{value}]:{int(port)}" if ":" in value else f"{value}:{int(port)}"
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - platform dependent
@@ -144,8 +154,14 @@ def _decoded_details(packet, info: dict) -> dict:
 
 
 def packet_to_info(packet) -> Optional[dict]:
-    """Normalise an observed packet into the shared Delta-NIDS packet contract."""
-    if ARP in packet and IP not in packet and IPv6 not in packet:
+    """Normalise IPv4 packets into the shared Delta-NIDS packet contract.
+
+    IPv6 is intentionally ignored so capture, detection, storage, and the
+    dashboard remain IPv4-only.
+    """
+    if IPv6 in packet:
+        return None
+    if ARP in packet and IP not in packet:
         arp = packet[ARP]
         return {
             "src_ip": getattr(arp, "psrc", None),
@@ -158,11 +174,11 @@ def packet_to_info(packet) -> Optional[dict]:
             "icmp_type": None,
             "icmp_code": None,
             "tcp_flags": None,
-            "details": {"arp_op": _safe_int(getattr(arp, "op", None)),
-                         "src_mac": getattr(arp, "hwsrc", None),
-                         "dst_mac": getattr(arp, "hwdst", None)},
+            "details": {"arp_op": _safe_int(getattr(arp, "op", None))},
+            "source": getattr(arp, "psrc", None),
+            "destination": getattr(arp, "pdst", None),
         }
-    if IP not in packet and IPv6 not in packet:
+    if IP not in packet:
         return None
 
     # Scapy's IPv6 extension layers can leave the transport protocol hidden
@@ -180,7 +196,7 @@ def packet_to_info(packet) -> Optional[dict]:
                 break
             transport_layer = next_layer
 
-    ip_layer = packet[IP] if IP in packet else packet[IPv6]
+    ip_layer = packet[IP]
     info = {
         "src_ip": ip_layer.src,
         "dst_ip": ip_layer.dst,
@@ -230,30 +246,15 @@ def packet_to_info(packet) -> Optional[dict]:
             elif TCP in inner:
                 info["icmp_inner_src_port"] = _safe_int(inner[TCP].sport)
                 info["icmp_inner_dst_port"] = _safe_int(inner[TCP].dport)
-    elif IPv6 in packet:
-        # Scapy may expose ICMPv6 packets through concrete layers; preserve
-        # quoted IPv6 transport headers for passive UDP scan correlation.
-        icmpv6 = icmpv6_layer
-        if icmpv6 is not None:
-            info.update(protocol="ICMPv6", icmp_type=128, icmp_code=0,
-                        icmp_id=_safe_int(getattr(icmpv6, "id", None)),
-                        icmp_sequence=_safe_int(getattr(icmpv6, "seq", None)),
-                        payload=bytes(icmpv6.payload))
-        elif icmpv6_error_layer is not None:
-            info.update(protocol="ICMPv6", icmp_type=_safe_int(getattr(icmpv6_error_layer, "type", None)),
-                        icmp_code=_safe_int(getattr(icmpv6_error_layer, "code", None)),
-                        payload=bytes(icmpv6_error_layer.payload))
-            inner = getattr(icmpv6_error_layer, "payload", None)
-            if inner is not None and IPv6 in inner:
-                info["icmp_inner_src_ip"] = inner[IPv6].src
-                info["icmp_inner_dst_ip"] = inner[IPv6].dst
-                info["icmp_inner_protocol"] = str(getattr(inner[IPv6], "nh", ""))
-                if UDP in inner:
-                    info["icmp_inner_src_port"] = _safe_int(inner[UDP].sport)
-                    info["icmp_inner_dst_port"] = _safe_int(inner[UDP].dport)
-        else:
-            info["protocol"] = "IPV6"
-    info["details"] = _decoded_details(packet, info)
+    # Ethernet metadata remains available to the decoder for low-level
+    # diagnostics, but it is not part of the normal user-facing normalized
+    # packet contract. Traffic persistence/API consumers therefore cannot
+    # mistake a MAC address for an IP endpoint.
+    decoded = _decoded_details(packet, info)
+    info["details"] = {key: value for key, value in decoded.items()
+                       if key not in {"src_mac", "dst_mac"}}
+    info["source"] = _format_endpoint(info["src_ip"], info["src_port"])
+    info["destination"] = _format_endpoint(info["dst_ip"], info["dst_port"])
     return info
 
 
@@ -329,6 +330,8 @@ def _raw_ip_to_info(raw_data: bytes) -> Optional[dict]:
         src_port, dst_port = struct.unpack("!HH", transport[0:4])
         info.update(protocol="UDP", src_port=src_port, dst_port=dst_port,
                     payload=transport[8:])
+    info["source"] = _format_endpoint(info["src_ip"], info["src_port"])
+    info["destination"] = _format_endpoint(info["dst_ip"], info["dst_port"])
     return info
 
 
@@ -483,12 +486,18 @@ class PacketCapture:
                     self._seen_packets.pop(packet_key, None)
             return False
 
-    def _dispatch(self, packet) -> None:
+    def _dispatch(self, packet, monotonic: Optional[float] = None) -> None:
         if self._stopped:
             return
         try:
             info = packet_to_info(packet)
             if info is not None and not self._stopped:
+                if monotonic is not None:
+                    # PCAP replay drives the detection clock from the capture
+                    # timestamps so sliding windows, flow/session expiry, and
+                    # deduplication behave exactly as they did during the live
+                    # capture. Wall-clock time is never used for replay state.
+                    info["_monotonic"] = float(monotonic)
                 if self._is_duplicate(info):
                     return
                 self.packets_seen += 1
@@ -551,10 +560,19 @@ class PacketCapture:
         # ---- PCAP replay path ------------------------------------------------
         if self.pcap_path:
             try:
+                last_timestamp: Optional[float] = None
                 for packet in rdpcap(self.pcap_path):
                     if self._stopped:
                         break
-                    self._dispatch(packet)
+                    timestamp = getattr(packet, "time", None)
+                    if timestamp is not None:
+                        # PCAPs are normally monotonic; clamp any backward jump
+                        # so the detection clock never runs backwards.
+                        timestamp = float(timestamp)
+                        if last_timestamp is not None and timestamp < last_timestamp:
+                            timestamp = last_timestamp
+                        last_timestamp = timestamp
+                    self._dispatch(packet, monotonic=timestamp)
             finally:
                 if self._stopped:
                     self.state = "STOPPED"
@@ -575,8 +593,16 @@ class PacketCapture:
             # captured (ICMP, TCP, UDP, ARP, etc.) and packet_to_info silently
             # discards non-IPv4 frames. A non-empty filter is honoured as-is.
             filter_arg = self.bpf_filter if self.bpf_filter else None
-            sniff(iface=iface_arg, filter=filter_arg, prn=self._dispatch,
-                  store=False, count=self.count, stop_filter=lambda _: self._stopped)
+            previous_bufsize = conf.bufsize
+            # Scanner-class bursts (masscan/nmap at 10k+ pps) can overflow the
+            # default 64 KiB receive buffer and silently drop the packets the
+            # detector needs. Enlarge the socket buffer for the capture.
+            conf.bufsize = max(conf.bufsize, 16 * 1024 * 1024)
+            try:
+                sniff(iface=iface_arg, filter=filter_arg, prn=self._dispatch,
+                      store=False, count=self.count, stop_filter=lambda _: self._stopped)
+            finally:
+                conf.bufsize = previous_bufsize
         except Exception:
             self.state = "ERROR"
             logger.exception("capture backend stopped unexpectedly")

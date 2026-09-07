@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch
 
 from dashboard.app import app
+from pathlib import Path
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -46,6 +47,13 @@ class DashboardProxyTests(unittest.TestCase):
         response = client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Delta", response.data)
+
+    def test_traffic_table_hides_ipv6(self):
+        script = (Path(__file__).parents[1] / "dashboard" / "static" / "js" / "main.js").read_text()
+        self.assertIn("return '—';", script)
+        self.assertNotIn("IPv6 address (open details)", script)
+        self.assertIn("endpoint(item.src_ip, item.src_port, true)", script)
+        self.assertIn("endpoint(alert.source_ip, alert.source_port)", script)
 
     def test_proxy_preserves_json_and_delete(self):
         base = f"http://127.0.0.1:{self.server.server_port}"

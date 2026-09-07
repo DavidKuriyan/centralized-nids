@@ -87,9 +87,14 @@ private:
             // Offline filtering is intentionally not emulated. PCAP filters are
             // applied by the live capture backend only in this phase.
         }
-        if (!config_.bpf_filter.empty() && config_.pcap_path.empty()) {
+        if (config_.pcap_path.empty()) {
+            // Enforce IPv4-only capture at the libpcap boundary. A user filter
+            // may further narrow traffic, but cannot re-enable IPv6.
+            const std::string ipv4_filter = config_.bpf_filter.empty()
+                ? "ip"
+                : "(ip) and (" + config_.bpf_filter + ")";
             bpf_program program{};
-            if (pcap_compile(handle_, &program, config_.bpf_filter.c_str(), 1, PCAP_NETMASK_UNKNOWN) != 0) {
+            if (pcap_compile(handle_, &program, ipv4_filter.c_str(), 1, PCAP_NETMASK_UNKNOWN) != 0) {
                 const std::string message = pcap_geterr(handle_);
                 close();
                 throw std::runtime_error(message);

@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 import logging
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -17,6 +18,18 @@ from sqlalchemy.exc import SQLAlchemyError
 logger = logging.getLogger("delta-ids")
 
 
+def format_endpoint(ip: object, port: object = None) -> str:
+    """Render an IPv4 endpoint; IPv6 is intentionally not exposed."""
+    if ip is None or ip == "":
+        return "-"
+    value = str(ip)
+    if ":" in value:
+        return "-"
+    if port is None or port == "":
+        return value
+    return f"{value}:{int(port)}"
+
+
 def now_epoch() -> int:
     return int(time.time())
 
@@ -28,26 +41,41 @@ def format_human_alert(timestamp: int, alert: dict, severity: str) -> str:
     sid = alert.get('sid', 0)
     rev = int(alert.get('revision', 1) or 1)
     protocol = str(alert.get('protocol') or 'IP').upper()
-    source = str(alert.get('src_ip') or '-')
-    destination = str(alert.get('dst_ip') or '-')
-    if protocol not in {'ICMP', 'ICMPV6', 'IP'} and alert.get('src_port'):
-        source += f":{alert['src_port']}"
-    if protocol not in {'ICMP', 'ICMPV6', 'IP'} and alert.get('dst_port'):
-        destination += f":{alert['dst_port']}"
+    source = format_endpoint(alert.get('src_ip'), alert.get('src_port') if protocol not in {'ICMP', 'ICMPV6', 'IP'} else None)
+    destination = format_endpoint(alert.get('dst_ip'), alert.get('dst_port') if protocol not in {'ICMP', 'ICMPV6', 'IP'} else None)
     priority = int(alert.get('priority') or 3)
     return (f'{stamp}  [*] [{gid}:{sid}:{rev}] {alert.get("message", "Detection event")} [*]\\n'
             f'[Priority: {priority}] {{{protocol}}} {source} -> {destination}')
 
 
 def alert_fingerprint(alert: dict, timestamp: int) -> str:
-    """Build an event identity without turning source identity into suppression."""
+    """Build an event identity without turning source identity into suppression.
+
+    Events that carry an explicit ``event_id`` (behavioral campaigns, correlated
+    detections) keep a unique identity per campaign. Events without one
+    (per-packet signature matches such as SSH banner observation) collapse into
+    a single unique alert per event class: the ephemeral source port and any
+    fixed time bucket are excluded so one recurring condition does not create a
+    new alert row for every packet or connection -- occurrence_count and
+    last_seen track how often and how recently it fired.
+    """
     event_id = alert.get("event_id")
+    if event_id is None:
+        fingerprint_material = "|".join(str(value) for value in (
+            alert.get('gid', 1), alert.get('sid', 0), alert.get('revision', 1),
+            alert.get('src_ip') or "",
+            alert.get('dst_ip') or "", alert.get('dst_port'),
+            alert.get('protocol', ''), alert.get('service', ''),
+            alert.get('detection_type', 'behavioral' if alert.get('is_ml_anomaly') else 'signature'),
+            alert.get('evidence', ''), alert.get('message', ''),
+        ))
+        return hashlib.sha256(fingerprint_material.encode()).hexdigest()
     fingerprint_material = "|".join(str(value) for value in (
         alert.get('gid', 1), alert.get('sid', 0), alert.get('revision', 1),
         alert.get('src_ip') or "", alert.get('src_port'), alert.get('dst_ip') or "",
         alert.get('dst_port'), alert.get('protocol', ''), alert.get('service', ''),
         alert.get('detection_type', 'behavioral' if alert.get('is_ml_anomaly') else 'signature'),
-        event_id if event_id is not None else int(timestamp // 30),
+        event_id,
         alert.get('evidence', ''), alert.get('message', ''),
     ))
     return hashlib.sha256(fingerprint_material.encode()).hexdigest()
@@ -64,6 +92,10 @@ class AlertManager:
         self._live_alert_index: dict[str, dict] = {}
         self._alert_counter = 0
         self._lock = threading.RLock()
+        # Thread that owns the SQLAlchemy session. SQLite connections created
+        # by this module must not be shared across threads (check_same_thread
+        # is left at its safe default), so cross-thread callers skip DB writes.
+        self._db_owner_thread = threading.current_thread()
         if self.session:
             self._persist_statistic("capture_sessions_started", 1)
 
@@ -105,7 +137,14 @@ class AlertManager:
             return None
         with self._lock:
             try:
-                row = TrafficLog(**event, payload_summary="", details=json.dumps(packet.get("details")) if packet.get("details") else None)
+                details = packet.get("details") or {}
+                # Defense in depth: callers may provide decoder metadata
+                # directly, but MAC fields must never enter normal traffic
+                # storage/API responses.
+                if isinstance(details, dict):
+                    details = {key: value for key, value in details.items()
+                               if "mac" not in str(key).lower()}
+                row = TrafficLog(**event, payload_summary="", details=json.dumps(details) if details else None)
                 self.session.add(row)
                 self.session.commit()
                 return int(row.id)
@@ -115,6 +154,10 @@ class AlertManager:
                 return None
 
     def log_alert(self, alert):
+        # Alerts use canonical IP endpoint fields. Strip any accidental legacy
+        # MAC aliases before exposing or persisting the event.
+        alert = {key: value for key, value in alert.items()
+                 if "mac" not in str(key).lower()}
         timestamp = now_epoch()
         fingerprint = alert_fingerprint(alert, timestamp)
         with self._lock:
@@ -221,9 +264,36 @@ class AlertManager:
             try:
                 self.session.add(Statistic(timestamp=now_epoch(), name=name, value=value))
                 self.session.commit()
-            except SQLAlchemyError as error:
+            except (SQLAlchemyError, sqlite3.OperationalError) as error:
                 self.session.rollback()
                 logger.error("failed to persist statistic: %s", error)
+
+    def _upsert_statistic(self, name: str, value: int) -> None:
+        """Maintain a single current row per counter name (no unbounded history).
+
+        Called from the capture thread's hot loop: one idempotent write per
+        second instead of two committed transactions per packet keeps the
+        shared database's write lock available for the dashboard and the C++
+        API, which previously collided into "database is locked".
+        """
+        if not self.session:
+            return
+        if threading.current_thread() is not getattr(self, "_db_owner_thread", None):
+            return
+        with self._lock:
+            try:
+                timestamp = now_epoch()
+                statement = sqlite_insert(Statistic).values(
+                    timestamp=timestamp, name=name, value=int(value)
+                ).on_conflict_do_update(
+                    index_elements=[Statistic.__table__.c.name],
+                    set_={"timestamp": timestamp, "value": int(value)},
+                )
+                self.session.execute(statement)
+                self.session.commit()
+            except (SQLAlchemyError, sqlite3.OperationalError) as error:
+                self.session.rollback()
+                logger.error("failed to upsert statistic: %s", error)
 
     def get_recent_traffic(self, limit=100):
         return list(self._live_traffic)[:limit]
