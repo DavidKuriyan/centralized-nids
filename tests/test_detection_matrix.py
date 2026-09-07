@@ -40,7 +40,7 @@ class _Engine:
         return False
 
 
-ATTACK_SIDS = {90002, 90003, 90005, 90007, 90008, 90009, 90010, 90011, 90012}
+ATTACK_SIDS = {90002, 90003, 90005, 90007, 90008, 90009, 90010, 90011, 90012, 90013, 90014, 90015, 90016}
 
 
 def make_core(recorder=None, **kwargs):
@@ -250,6 +250,65 @@ class FtpBannerGrabTests(unittest.TestCase):
         # same window merge instead of flooding the alert stream.
         self.assertEqual([alert["sid"] for alert in recorder.alerts], [90008])
         self.assertEqual(len(recorder.alerts), 1)
+
+    def test_http_banner_grab_is_detected(self):
+        core, recorder = make_core(http_banner_grab_threshold=1, http_banner_grab_window=60.0)
+        packets = [
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "S", t=1.0),
+            tcp("10.0.0.80", 80, "203.0.113.50", 52000, "SA", t=1.01),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "A", t=1.02),
+            tcp("10.0.0.80", 80, "203.0.113.50", 52000, "PA",
+                payload=b"HTTP/1.1 200 OK\r\nServer: nginx/1.18.0\r\nContent-Length: 0\r\n\r\n",
+                t=1.03),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "FA", t=1.04),
+        ]
+        for packet in packets:
+            core.process_packet(packet)
+        self.assertEqual([alert["sid"] for alert in recorder.alerts], [90016])
+        alert = recorder.alerts[0]
+        self.assertIn("HTTP banner", alert["message"])
+        self.assertIn("Server: nginx/1.18.0", alert["evidence"])
+        self.assertIn("banner_pattern=server_response_only", alert["evidence"])
+        self.assertEqual(alert["severity"], "Medium")
+        self.assertEqual(alert["service"], "http")
+
+    def test_legitimate_http_request_with_get_is_not_a_banner_grab(self):
+        core, recorder = make_core(http_banner_grab_threshold=1, http_banner_grab_window=60.0)
+        packets = [
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "S", t=1.0),
+            tcp("10.0.0.80", 80, "203.0.113.50", 52000, "SA", t=1.01),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "A", t=1.02),
+            tcp("10.0.0.80", 80, "203.0.113.50", 52000, "PA",
+                payload=b"HTTP/1.1 200 OK\r\nServer: nginx/1.18.0\r\nContent-Length: 0\r\n\r\n",
+                t=1.03),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "PA",
+                payload=b"GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n",
+                t=1.04),
+            tcp("10.0.0.80", 80, "203.0.113.50", 52000, "PA",
+                payload=b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" +
+                b"<html>" + b"A" * 100 + b"</html>",
+                t=1.05),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 80, "FA", t=1.06),
+        ]
+        for packet in packets:
+            core.process_packet(packet)
+        self.assertEqual([alert["sid"] for alert in recorder.alerts], [])
+
+    def test_http_banner_grab_on_non_standard_port_is_detected(self):
+        core, recorder = make_core(http_banner_grab_threshold=1, http_banner_grab_window=60.0)
+        packets = [
+            tcp("203.0.113.50", 52000, "10.0.0.80", 8080, "S", t=1.0),
+            tcp("10.0.0.80", 8080, "203.0.113.50", 52000, "SA", t=1.01),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 8080, "A", t=1.02),
+            tcp("10.0.0.80", 8080, "203.0.113.50", 52000, "PA",
+                payload=b"HTTP/1.1 200 OK\r\nServer: Apache/2.4.41\r\n\r\n",
+                t=1.03),
+            tcp("203.0.113.50", 52000, "10.0.0.80", 8080, "FA", t=1.04),
+        ]
+        for packet in packets:
+            core.process_packet(packet)
+        self.assertEqual([alert["sid"] for alert in recorder.alerts], [90016])
+        self.assertIn("destination_port=8080", recorder.alerts[0]["evidence"])
 
 
 class FtpBruteForceTests(unittest.TestCase):
@@ -639,6 +698,47 @@ class PcapReplayDeterminismTests(unittest.TestCase):
         ftp_alerts = [alert for alert in recorder.alerts if alert["sid"] == 90008]
         self.assertEqual(len(ftp_alerts), 1, [alert["sid"] for alert in recorder.alerts])
         self.assertIn("vsFTPd 3.0.3", ftp_alerts[0]["evidence"])
+
+    def test_ssh_banner_grab_pcap_replay(self):
+        """SSH banner grabbing (netcat-style: server banner only) written to a PCAP must alert."""
+        packets = []
+        grab = [
+            Ether() / IP(src="203.0.113.50", dst="10.0.0.22") / TCP(sport=51000, dport=22, flags="S"),
+            Ether() / IP(src="10.0.0.22", dst="203.0.113.50") / TCP(sport=22, dport=51000, flags="SA"),
+            Ether() / IP(src="203.0.113.50", dst="10.0.0.22") / TCP(sport=51000, dport=22, flags="A"),
+            Ether() / IP(src="10.0.0.22", dst="203.0.113.50") / TCP(sport=22, dport=51000, flags="PA") /
+            Raw(b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4\r\n"),
+            Ether() / IP(src="203.0.113.50", dst="10.0.0.22") / TCP(sport=51000, dport=22, flags="FA"),
+        ]
+        for offset, packet in enumerate(grab):
+            packet.time = 10.0 + offset * 0.01
+            packets.append(packet)
+        core, recorder = self.replay(packets, ssh_banner_grab_threshold=1, ssh_banner_grab_window=60.0)
+        ssh_alerts = [alert for alert in recorder.alerts if alert["sid"] == 90015]
+        self.assertEqual(len(ssh_alerts), 1, [alert["sid"] for alert in recorder.alerts])
+        self.assertIn("SSH banner enumeration", ssh_alerts[0]["message"])
+        self.assertIn("banner_pattern=server_only", ssh_alerts[0]["evidence"])
+
+    def test_http_banner_grab_pcap_replay(self):
+        """HTTP banner grabbing (netcat-style: server response only) written to a PCAP must alert."""
+        packets = []
+        grab = [
+            Ether() / IP(src="203.0.113.50", dst="10.0.0.80") / TCP(sport=52000, dport=80, flags="S"),
+            Ether() / IP(src="10.0.0.80", dst="203.0.113.50") / TCP(sport=80, dport=52000, flags="SA"),
+            Ether() / IP(src="203.0.113.50", dst="10.0.0.80") / TCP(sport=52000, dport=80, flags="A"),
+            Ether() / IP(src="10.0.0.80", dst="203.0.113.50") / TCP(sport=80, dport=52000, flags="PA") /
+            Raw(b"HTTP/1.1 200 OK\r\nServer: nginx/1.18.0\r\nContent-Length: 0\r\n\r\n"),
+            Ether() / IP(src="203.0.113.50", dst="10.0.0.80") / TCP(sport=52000, dport=80, flags="FA"),
+        ]
+        for offset, packet in enumerate(grab):
+            packet.time = 10.0 + offset * 0.01
+            packets.append(packet)
+        core, recorder = self.replay(packets, http_banner_grab_threshold=1, http_banner_grab_window=60.0)
+        http_alerts = [alert for alert in recorder.alerts if alert["sid"] == 90016]
+        self.assertEqual(len(http_alerts), 1, [alert["sid"] for alert in recorder.alerts])
+        self.assertIn("HTTP banner enumeration", http_alerts[0]["message"])
+        self.assertIn("Server: nginx/1.18.0", http_alerts[0]["evidence"])
+        self.assertIn("banner_pattern=server_response_only", http_alerts[0]["evidence"])
 
     def test_reverse_shell_pcap_replay(self):
         """A long interactive callback written to a PCAP must alert on replay."""

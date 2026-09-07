@@ -77,6 +77,15 @@ def _is_web_framed_payload(payload: bytes) -> bool:
     return _HTTP_REQUEST_RE.match(payload) is not None
 
 
+def _is_http_response(payload: bytes) -> bool:
+    """True when the payload is a server HTTP response (status line).
+
+    Used to mark HTTP banner-grab connections where the server sent a
+    response but the client never sent a request (netcat-style grab).
+    """
+    return payload.startswith((b"HTTP/1.", b"HTTP/2 "))
+
+
 # FTP product/version extraction from a 220 greeting line.
 _FTP_PRODUCT_RE = re.compile(
     r"(?i)(vsftpd|proftpd|pure-?ftpd|wu-?ftpd|filezilla|microsoft ftp|serv-u|iis|glftpd|bftpd|pyftpdlib)[^0-9]{0,8}([0-9][0-9a-zA-Z._-]*)"
@@ -124,10 +133,12 @@ class DeltaCore:
                  syn_flood_threshold: int = 100,
                  ssh_brute_force_threshold: int = 10,
                  ssh_brute_force_window: float = 60.0,
+                 ssh_banner_grab_threshold: int = 1, ssh_banner_grab_window: float = 60.0,
                  ftp_grab_threshold: int = 1, ftp_enum_window: float = 60.0,
                  ftp_brute_force_threshold: int = 10,
                  ftp_brute_force_window: float = 60.0,
                  http_enum_threshold: int = 40, http_enum_window: float = 60.0,
+                 http_banner_grab_threshold: int = 1, http_banner_grab_window: float = 60.0,
                  reverse_shell_min_duration: float = 30.0,
                  connection_idle_timeout: float = 120.0,
                  correlation_window: float = 600.0):
@@ -147,12 +158,16 @@ class DeltaCore:
         # reaches the configured threshold (default 10) inside the window.
         self.ssh_brute_force_threshold = max(2, int(ssh_brute_force_threshold))
         self.ssh_brute_force_window = max(5.0, float(ssh_brute_force_window))
+        self.ssh_banner_grab_threshold = max(1, int(ssh_banner_grab_threshold))
+        self.ssh_banner_grab_window = max(5.0, float(ssh_banner_grab_window))
         self.ftp_brute_force_threshold = max(2, int(ftp_brute_force_threshold))
         self.ftp_brute_force_window = max(5.0, float(ftp_brute_force_window))
         self.ftp_grab_threshold = max(1, int(ftp_grab_threshold))
         self.ftp_enum_window = max(5.0, float(ftp_enum_window))
         self.http_enum_threshold = max(5, int(http_enum_threshold))
         self.http_enum_window = max(5.0, float(http_enum_window))
+        self.http_banner_grab_threshold = max(1, int(http_banner_grab_threshold))
+        self.http_banner_grab_window = max(5.0, float(http_banner_grab_window))
         self.reverse_shell_min_duration = max(1.0, float(reverse_shell_min_duration))
         self.connection_idle_timeout = max(10.0, float(connection_idle_timeout))
         self.correlation_window = max(30.0, float(correlation_window))
@@ -190,6 +205,9 @@ class DeltaCore:
         # HTTP resource enumeration per target web service:
         # (source, destination, dst_port) -> {paths, emitted}.
         self._http_enum: dict[tuple[str, str, int], dict[str, Any]] = {}
+        # HTTP banner-grab evidence per target web service:
+        # (client_ip, server_ip, service_port) -> {grabs, emitted}.
+        self._http_banner_grabs: dict[tuple[str, str, int], dict[str, Any]] = {}
         # Attack-sequence correlation: (attacker, victim) -> {first_seen, last_seen}.
         self._recon: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_conn_prune = 0.0
@@ -218,6 +236,7 @@ class DeltaCore:
         self._max_ftp_auth_states = 2048
         self._max_conn_states = 8192
         self._max_http_states = 2048
+        self._max_http_banner_grab_states = 2048
         self._max_recon_states = 4096
 
     @staticmethod
@@ -471,6 +490,57 @@ class DeltaCore:
                         detection_type="ssh_brute_force", service="ssh", confidence=85)
             self._record_recon(client, server, now)
 
+    def _register_ssh_banner_grab(self, state: dict[str, Any], packet: dict, now: float) -> None:
+        """Register a single SSH banner grab (netcat-style: server banner only).
+
+        Unlike full SSH brute force which requires bidirectional banner exchange,
+        this detects the pattern where a client connects, receives the server's
+        SSH-2.0 banner, and closes without sending their own banner back - the
+        classic netcat banner-grabbing pattern.
+        """
+        client = state["client_ip"]
+        server = state["server_ip"]
+        service_port = int(state.get("syn_port") if state.get("syn_port") is not None else state["server_port"])
+        key = (client, server, service_port)
+        ssh_state = self._ssh.setdefault(key, {"sessions": deque(), "banner_grabs": deque(), "emitted": False, "banner_emitted": False})
+        grabs = ssh_state.setdefault("banner_grabs", deque())
+        grabs.append(now)
+        self._prune_ssh_banner_grabs(now)
+        if len(grabs) >= self.ssh_banner_grab_threshold and not ssh_state.get("banner_emitted"):
+            ssh_state["banner_emitted"] = True
+            event_id = self._next_event_id("ssh-banner-grab")
+            evidence = (f"attack_type=ssh_banner_enumeration; service=ssh; source={client}; "
+                        f"destination={server}; destination_port={service_port}; "
+                        f"banner_grabs={len(grabs)}; window_seconds={self.ssh_banner_grab_window:g}; "
+                        f"banner_pattern=server_only")
+            self._alert(packet, 90015, "Medium",
+                        f"SSH banner enumeration (netcat-style) from {client} to {server}:{service_port}",
+                        evidence=evidence,
+                        explanation=("SSH connection received the server banner and closed without "
+                                     "completing a bidirectional banner exchange (netcat-style grab)"),
+                        event_id=event_id,
+                        detection_type="ssh_banner_enumeration", service="ssh", confidence=70)
+            self._record_recon(client, server, now)
+
+    def _prune_ssh_banner_grabs(self, now: float) -> None:
+        """Prune expired SSH banner grab detections (netcat-style, single banner)."""
+        cutoff = now - self.ssh_banner_grab_window
+        for key, state in list(self._ssh.items()):
+            grabs = state.get("banner_grabs")
+            if not grabs:
+                continue
+            while grabs and grabs[0] < cutoff:
+                grabs.popleft()
+            if not grabs:
+                state.pop("banner_grabs", None)
+                if not state.get("sessions"):
+                    self._ssh.pop(key, None)
+                continue
+            if len(grabs) < self.ssh_banner_grab_threshold:
+                state["banner_emitted"] = False
+        self._evict_oldest(self._ssh, self._max_ssh_states,
+                           lambda state: (state.get("banner_grabs") or state.get("sessions") or [0])[-1])
+
     # ------------------------------------------------------------------
     # FTP banner/version enumeration detection
     #
@@ -689,6 +759,17 @@ class DeltaCore:
             if state.get("ftp_banner") is None:
                 state["ftp_banner"] = payload.split(b"\r\n", 1)[0][:256]
                 state["ftp_banner_at"] = now
+        if from_client and _HTTP_REQUEST_RE.match(payload):
+            # A client HTTP request (GET/POST/...) marks a legitimate web
+            # session rather than a bare banner grab.
+            state["http_client_request"] = True
+        if not from_client and _is_http_response(payload):
+            # Server HTTP response identifies the HTTP service. Keep the
+            # status line plus following header lines (Server: ...) so
+            # banner/version evidence can name the web server software.
+            if state.get("http_banner") is None:
+                state["http_banner"] = b"\r\n".join(payload.split(b"\r\n")[:8])[:1024]
+                state["http_banner_at"] = now
         if _is_web_framed_payload(payload):
             # TLS records, HTTP messages, and h2 prefaces mark the stream as a
             # protocol conversation (browsing/API traffic). A stream made up
@@ -858,7 +939,7 @@ class DeltaCore:
         if state.get("evaluated"):
             return
         state["evaluated"] = True
-        if state.get("ssh_client") or state.get("ssh_server") or state.get("ftp_banner"):
+        if state.get("ssh_client") or state.get("ssh_server") or state.get("ftp_banner") or state.get("http_banner"):
             return
         if not state.get("syn"):
             return
@@ -941,8 +1022,32 @@ class DeltaCore:
         state, _oriented = self._lookup_connection(packet)
         if state is None:
             return
-        if state.get("ssh_client") and state.get("ssh_server") and state.get("syn"):
-            self._register_ssh_session(state, packet, now)
+        # SSH banner exchange detection: a completed SSH session requires both
+        # client and server banners (full handshake). However, netcat-style
+        # banner grabbing only receives the server banner without sending one
+        # back. We detect both patterns:
+        # - Full exchange (ssh_client AND ssh_server): normal/tool brute force
+        # - Server-only banner (ssh_server only): netcat-style banner grab
+        if state.get("syn") and state.get("closed"):
+            if state.get("ssh_client") and state.get("ssh_server"):
+                # Full bidirectional banner exchange - counts as a session
+                self._register_ssh_session(state, packet, now)
+            elif state.get("ssh_server") and not state.get("ssh_client"):
+                # Server sent SSH banner but client didn't respond with one
+                # (netcat-style banner grab). Track for single-grab detection.
+                self._register_ssh_banner_grab(state, packet, now)
+
+    # ------------------------------------------------------------------
+    # HTTP banner/version enumeration detection (netcat-style grab)
+    # ------------------------------------------------------------------
+
+    def _http_banner_grab(self, packet: dict, now: float) -> None:
+        state, _oriented = self._lookup_connection(packet)
+        if state is None:
+            return
+        if state.get("syn") and state.get("closed"):
+            if state.get("http_banner") and not state.get("ftp_banner") and not state.get("http_client_request"):
+                self._register_http_banner_grab(state, packet, now)
 
     # ------------------------------------------------------------------
     # HTTP resource enumeration (Nikto-class behaviour)
@@ -1010,6 +1115,65 @@ class DeltaCore:
                         event_id=event_id,
                         detection_type="http_enumeration", service="http", confidence=70)
             self._record_recon(str(src), str(dst), now)
+
+    # ------------------------------------------------------------------
+    # HTTP banner/version enumeration detection (netcat-style grab)
+    # ------------------------------------------------------------------
+
+    def _prune_http_banner_grabs(self, now: float) -> None:
+        cutoff = now - self.http_banner_grab_window
+        for key, state in list(self._http_banner_grabs.items()):
+            grabs = state["grabs"]
+            while grabs and grabs[0] < cutoff:
+                grabs.popleft()
+            if not grabs:
+                self._http_banner_grabs.pop(key, None)
+                continue
+            if len(grabs) < self.http_banner_grab_threshold:
+                state["emitted"] = False
+        self._evict_oldest(self._http_banner_grabs, self._max_http_banner_grab_states,
+                           lambda state: state["grabs"][-1])
+
+    def _register_http_banner_grab(self, state: dict[str, Any], packet: dict, now: float) -> None:
+        """Register a single HTTP banner grab (netcat-style: server response only).
+
+        Unlike full HTTP enumeration which requires many distinct request paths,
+        this detects the pattern where a client connects to an HTTP service,
+        receives the server's response headers/banner, and closes without sending
+        a proper request - the classic netcat banner-grabbing pattern.
+        """
+        client = state["client_ip"]
+        server = state["server_ip"]
+        service_port = int(state.get("syn_port") if state.get("syn_port") is not None else state["server_port"])
+        key = (client, server, service_port)
+        grab_state = self._http_banner_grabs.setdefault(key, {"grabs": deque(), "emitted": False})
+        grabs = grab_state["grabs"]
+        grabs.append(now)
+        self._prune_http_banner_grabs(now)
+        if len(grabs) >= self.http_banner_grab_threshold and not grab_state["emitted"]:
+            grab_state["emitted"] = True
+            event_id = self._next_event_id("http-banner-grab")
+            banner_text = state.get("http_banner") or b""
+            banner_parts = banner_text.split(b"\r\n")
+            server_header = ""
+            for part in banner_parts[:16]:
+                if part.lower().startswith(b"server:"):
+                    server_header = part.decode("utf-8", errors="replace").strip()
+                    break
+            first_line = banner_text.split(b"\r\n", 1)[0][:128].decode("utf-8", errors="replace")
+            evidence = (f"attack_type=http_banner_enumeration; service=http; source={client}; "
+                        f"destination={server}; destination_port={service_port}; "
+                        f"banner=[{first_line}]; server_header=[{server_header}]; "
+                        f"banner_grabs={len(grabs)}; window_seconds={self.http_banner_grab_window:g}; "
+                        f"banner_pattern=server_response_only")
+            self._alert(packet, 90016, "Medium",
+                        f"HTTP banner enumeration (netcat-style) from {client} to {server}:{service_port}",
+                        evidence=evidence,
+                        explanation=("HTTP connection received the server response and closed without "
+                                     "sending a proper HTTP request (netcat-style grab)"),
+                        event_id=event_id,
+                        detection_type="http_banner_enumeration", service="http", confidence=70)
+            self._record_recon(client, server, now)
 
     # ------------------------------------------------------------------
     # Attack-sequence correlation
@@ -1471,6 +1635,7 @@ class DeltaCore:
             self._syn_flood(packet, now)
             self._ssh_brute_force(packet, now)
             self._ftp_banner_enumeration(packet, now)
+            self._http_banner_grab(packet, now)
             self._http_enumeration(packet, now)
             # Correlate target responses with each active probe class. The
             # response source port is the probed destination port.
