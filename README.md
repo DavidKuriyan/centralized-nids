@@ -93,6 +93,33 @@ py run_project.py --interface "Ethernet"
 py run_project.py
 ```
 
+### SPAN / Port Mirroring Capture Mode
+
+Delta-NIDS supports passive monitoring directly from a switch SPAN (mirror) destination port:
+
+```bash
+# Linux
+sudo -E env HOME="$HOME" .venv/bin/python run_project.py --interface eth1 --capture-mode span
+
+# Windows (Elevated PowerShell)
+py run_project.py --interface "Ethernet 2" --capture-mode span
+
+# Direct Python capture engine
+python main.py -i eth1 --capture-mode span --snap-length 65535 --buffer-size 16777216
+
+# Direct Native C++ engine
+./delta-nids -i eth1 --capture-mode span
+```
+
+In SPAN mode:
+- **Promiscuous mode** is strictly enforced.
+- **Empty BPF filter** captures all protocols (IPv4, IPv6, ICMP, ICMPv6, ARP, VLAN).
+- **802.1Q and QinQ** tags are extracted and stripped before transport analysis.
+- **Deduplication** absorbs mirror-induced duplicates across symmetric monitor sessions.
+- **Zero-traffic watchdog** alerts operators if the switch SPAN feed stops sending frames.
+- See [docs/span_port_mirroring.md](docs/span_port_mirroring.md) for full switch configuration examples (Cisco, Arista, Juniper, Linux OVS).
+
+
 ### PCAP replay
 
 PCAP replay does not require capture privileges:
@@ -122,6 +149,7 @@ The default database is user-owned at `$HOME/.local/share/delta-nids/nids.sqlite
 ```text
 python run_project.py [--interface NAME | --pcap FILE]
                        [--db PATH] [--filter BPF] [--count N]
+                       [--capture-mode normal|span]
                        [--api-port PORT] [--dashboard-port PORT]
                        [--no-capture]
 ```
@@ -269,3 +297,5 @@ Useful native checks:
 ## License
 
 No license file is currently declared. Add and review a license before distribution.
+#   c e n t r a l i z e d - n i d s  
+ 
