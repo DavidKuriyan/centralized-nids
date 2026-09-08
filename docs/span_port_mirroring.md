@@ -1,18 +1,18 @@
-# SPAN / Port Mirroring Deployment Guide for Delta-NIDS
+# SPAN / Port Mirroring Deployment Guide
 
-This guide provides step-by-step instructions for configuring switch port mirroring (SPAN) and deploying Delta-NIDS to monitor mirrored network traffic in production.
+This guide provides engineering procedures for deploying **Centralized-NIDS** on enterprise switch port mirroring sessions (SPAN), Remote SPAN (RSPAN), Encapsulated Remote SPAN (ERSPAN), and hypervisor virtual switches.
 
-Delta-NIDS operates strictly as a **passive network intrusion detection system**. It does not inject traffic, modify frames, send TCP resets, or participate in routing / Spanning Tree protocols.
+Centralized-NIDS operates strictly as a **passive network sensor**. It does not inject traffic, modify frames, send TCP resets, or participate in Spanning Tree Protocol (STP).
 
 ---
 
-## 1. Overview & Passive Architecture
+## 1. Architectural Model & Evidence Flow
 
-In a Switched Port Analyzer (SPAN) or port mirroring setup, the network switch creates a copy of network packets passing through designated source ports, VLANs, or aggregation uplinks and directs them to a dedicated mirror destination port connected to Delta-NIDS.
+In a Switched Port Analyzer (SPAN) deployment, the physical or virtual switch copies traffic traversing designated source ports, VLANs, or aggregation trunks and directs it to a dedicated mirror destination port connected to the sensor interface.
 
 ```text
                ┌───────────────────────────────────────────────┐
-               │         Core / Distribution Switch            │
+               │          Core / Distribution Switch           │
                │                                               │
                │  [Port 1]      [Port 2]      [Port 3]         │
                └───┬──────────────┬──────────────┬─────────────┘
@@ -20,7 +20,7 @@ In a Switched Port Analyzer (SPAN) or port mirroring setup, the network switch c
                 [Client]       [Server]      [Firewall]
                    │              │              │
                    └───────┬──────┴──────────────┘
-                           │ (Switch internally copies frames)
+                           │ (Switch internally replicates frames)
                            ▼
                ┌──────────────────────┐
                │ SPAN Destination     │
@@ -29,51 +29,48 @@ In a Switched Port Analyzer (SPAN) or port mirroring setup, the network switch c
                           │ (Passive unnumbered link)
                           ▼
                ┌───────────────────────────────────────────────┐
-               │           Delta-NIDS Sensor Host              │
+               │         Centralized-NIDS Sensor Host          │
                │                                               │
                │  • Dedicated NIC in Promiscuous Mode          │
-               │  • 802.1Q / QinQ VLAN tag stripping           │
-               │  • IPv4 & IPv6 dual-stack protocol decoder    │
-               │  • Real-time deduplication & reassembly       │
-               │  • Rule engine & behavioral detectors         │
-               │  • SQLite telemetry & Web monitoring console  │
+               │  • 802.1Q / QinQ VLAN Tag Stripping           │
+               │  • IPv4 & IPv6 Dual-Stack Protocol Decoder    │
+               │  • Real-time Duplicate Filter & Reassembly    │
+               │  • Signature Engine & Behavioral Detectors    │
+               │  • SQLite Storage & Real-Time Web Console     │
                └───────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. How to Enable Port Mirroring on Switches & Hypervisors
-
-Choose your switch platform below to configure port mirroring to the port where the Delta-NIDS sensor NIC is connected.
+## 2. Switch Configuration Examples
 
 ### A. Cisco IOS / Catalyst Switches
-Mirrors traffic from source ports (e.g., GigabitEthernet0/1 through 0/4) to the Delta-NIDS destination port (e.g., GigabitEthernet0/24):
+Mirrors ingress and egress traffic from source access/trunk ports (e.g., `GigabitEthernet0/1 - 4`) to the sensor destination port (`GigabitEthernet0/24`). `encapsulation replicate` preserves 802.1Q VLAN headers for inspection.
 
 ```text
-! Enter configuration mode
 enable
 configure terminal
 
-! Remove any existing session 1
+! Remove any existing monitor session
 no monitor session 1
 
-! Set source ports to monitor both ingress and egress (Rx and Tx)
+! Configure source ports for bidirectional monitoring
 monitor session 1 source interface GigabitEthernet0/1 - 4 both
 
-! Set destination port where Delta-NIDS is connected
-! 'encapsulation replicate' preserves 802.1Q VLAN headers for NIDS inspection
+! Configure destination port preserving VLAN tags
 monitor session 1 destination interface GigabitEthernet0/24 encapsulation replicate
 
-! Exit and save configuration
 end
 write memory
 ```
 
-To monitor an entire VLAN instead of individual ports:
+To mirror entire VLANs:
 ```text
 monitor session 1 source vlan 10,20,30 both
 monitor session 1 destination interface GigabitEthernet0/24 encapsulation replicate
 ```
+
+---
 
 ### B. Cisco Nexus (NX-OS)
 ```text
@@ -86,6 +83,8 @@ end
 copy running-config startup-config
 ```
 
+---
+
 ### C. Arista EOS
 ```text
 enable
@@ -97,69 +96,70 @@ end
 write memory
 ```
 
+---
+
 ### D. Juniper Junos (EX / QFX Series)
 ```text
 edit
-set forwarding-options analyzer DELTA_SPAN input ingress interface ge-0/0/0.0
-set forwarding-options analyzer DELTA_SPAN input egress interface ge-0/0/0.0
-set forwarding-options analyzer DELTA_SPAN output interface ge-0/0/23.0
+set forwarding-options analyzer CENTRAL_SPAN input ingress interface ge-0/0/0.0
+set forwarding-options analyzer CENTRAL_SPAN input egress interface ge-0/0/0.0
+set forwarding-options analyzer CENTRAL_SPAN output interface ge-0/0/23.0
 commit and-quit
 ```
 
-### E. Ubiquiti UniFi (Switch Controller)
-1. In the **UniFi Network Controller**, go to **UniFi Devices**.
-2. Select your switch and click **Port Manager**.
-3. Select the destination port where Delta-NIDS is plugged in.
+---
+
+### E. Ubiquiti UniFi Switches
+1. Navigate to **UniFi Devices** in the UniFi Controller.
+2. Select your switch and open **Port Manager**.
+3. Select the port connected to Centralized-NIDS.
 4. Set **Port Profile / Operation** to **Mirroring**.
-5. Select the **Mirrored Port** (the source uplink or server port to monitor).
-6. Click **Apply Changes**.
+5. Select the target **Mirrored Port** (uplink or server port).
+6. Apply changes.
+
+---
 
 ### F. MikroTik RouterOS
 ```text
-# Mirror switch port ether1 to ether5 (connected to Delta-NIDS)
 /interface ethernet switch
 set mirror-source=ether1 mirror-target=ether5
 ```
 
+---
+
 ### G. Linux / Open vSwitch (OVS)
-Create a mirror on a Linux bridge or OVS switch:
 ```bash
-# Open vSwitch mirror
 ovs-vsctl -- --id=@p1 get port eth1 \
           -- --id=@m create mirror name=span0 select-all=true output-port=@p1 \
           -- set bridge br0 mirrors=@m
 ```
 
-### H. VMware ESXi (vSphere vSwitch / Distributed Switch)
-1. **Standard vSwitch**:
-   - Go to **Networking** > **Virtual Switches** > Select your vSwitch > **Edit settings**.
-   - Under **Security**, set **Promiscuous mode** to **Accept**.
-2. **Distributed Switch (VDS)**:
-   - In vSphere Client, go to **Networking** > Select VDS > **Configure** > **Port Mirroring**.
-   - Add a new Port Mirroring Session (Type: **Distributed Port Mirroring**).
-   - Add the target VMs / VNICs as **Sources** (Normal).
-   - Add the Delta-NIDS VM virtual port as the **Destination**.
+---
+
+### H. VMware ESXi (vSphere Distributed Switch)
+1. In vSphere Client, navigate to **Networking** > Select Distributed Switch > **Configure** > **Port Mirroring**.
+2. Create a new Port Mirroring Session (Type: **Distributed Port Mirroring**).
+3. Set source target VMs / vNICs as **Sources**.
+4. Set the Centralized-NIDS VM virtual port as the **Destination**.
+5. Ensure Promiscuous Mode is set to **Accept** on the destination port group.
 
 ---
 
-## 3. Host Interface Preparation (Zero-Interference)
+## 3. Host Network Interface Hardening
 
-The SPAN destination NIC should be configured purely as a listener so the sensor host never transmits traffic onto the mirror feed.
+The sensor network adapter should be unnumbered and configured strictly as a listener, preventing the sensor from emitting packets onto the mirror network.
 
 ### Linux Sensor Host
 ```bash
-# 1. Identify the mirror network interface name
-ip link show
-
-# 2. Set interface up and enable promiscuous mode
+# 1. Bring up interface in promiscuous mode
 sudo ip link set eth1 promisc on up
 
-# 3. Disable IPv6 auto-configuration and IPv4 ARP on the mirror NIC
+# 2. Disable IPv6 auto-configuration and IPv4 ARP on the mirror NIC
 sudo sysctl -w net.ipv6.conf.eth1.disable_ipv6=1
 sudo sysctl -w net.ipv4.conf.eth1.arp_ignore=8
 sudo sysctl -w net.ipv4.conf.eth1.arp_announce=2
 
-# 4. Enlarge OS receive buffer for high-throughput microbursts
+# 3. Expand OS socket receive buffers for bursty line rates
 sudo sysctl -w net.core.rmem_max=67108864
 sudo sysctl -w net.core.rmem_default=33554432
 ```
@@ -174,100 +174,70 @@ sudo sysctl -w net.core.rmem_default=33554432
 
 ---
 
-## 4. How to Run Delta-NIDS in SPAN Mode
+## 4. Running Centralized-NIDS in SPAN Mode
 
-Delta-NIDS provides three ways to run in SPAN mode depending on your workflow.
-
-### Method 1: The Unified Launcher (Recommended for Full Operations)
-
-The unified launcher starts the capture pipeline, SQLite database, native API, and web monitoring console together.
+### Method 1: The Unified Production Launcher (Recommended)
+Orchestrates the SPAN capture pipeline, SQLite database, C++ REST API, and web monitoring console.
 
 #### On Windows:
-1. Open **PowerShell as Administrator**:
-2. Activate your virtual environment and run:
 ```powershell
-cd "d:\Cyber security Projects\New folder\Centralized-delta-nids\delta-ids"
+# Open PowerShell as Administrator
+cd "path\to\centralized-nids"
 .\.venv\Scripts\Activate.ps1
 
-# List available network interfaces to find your SPAN adapter:
-py -c "from scapy.all import show_interfaces; show_interfaces()"
-
-# Run in SPAN mode on your mirror adapter (e.g. "Ethernet 2" or "eth1"):
+# Run on the mirror adapter in SPAN mode:
 py run_project.py --interface "Ethernet 2" --capture-mode span
 ```
 
 #### On Linux:
 ```bash
-cd /path/to/delta-ids
+cd /path/to/centralized-nids
 source .venv/bin/activate
 
-# Run with sudo to permit promiscuous socket capture:
 sudo -E env HOME="$HOME" PATH="$PATH" python run_project.py --interface eth1 --capture-mode span
 ```
 
-Once running, access the web console at:
-👉 **`http://127.0.0.1:8081`**
+Access the dashboard at: **`http://127.0.0.1:8081`**
 
 ---
 
-### Method 2: Standalone Python Capture Engine (`main.py`)
-
-To run the continuous detection engine in terminal-only or background daemon mode:
-
+### Method 2: Standalone Engine (`main.py`)
 ```bash
-# Basic SPAN capture
-python main.py -i eth1 --capture-mode span
-
-# SPAN capture with persistence, custom buffer (32 MB), and jumbo frame snap-length
+# Capture with custom buffer (32 MB) and jumbo frame snap-length
 python main.py -i eth1 --capture-mode span --snap-length 9216 --buffer-size 33554432 --persist --db database/nids.sqlite
 ```
 
 ---
 
-### Method 3: Native C++ High-Performance Engine (`delta-nids`)
-
-For maximum line-rate capture and low-latency rule evaluation:
-
+### Method 3: Native High-Speed C++ Engine
 ```bash
-# Build the C++ binary (if not already built)
+# Build Release executable
 cmake -S . -B build -DDELTA_NIDS_BUILD_TESTS=ON
 cmake --build build --config Release
 
-# Run in SPAN mode
+# Run native binary in SPAN mode
 ./build/Release/delta-nids.exe -i eth1 --capture-mode span
 # (On Linux: ./build/delta-nids -i eth1 --capture-mode span)
 ```
 
 ---
 
-## 5. Verification & Health Monitoring
+## 5. Health Monitoring & Verification
 
 ### 1. Zero-Traffic Watchdog
-If the switch SPAN session is inactive, the cable is unplugged, or the wrong interface was specified, Delta-NIDS automatically detects that 0 packets have been received after 10–30 seconds and outputs an actionable warning:
-
+If the switch SPAN session is disabled or a cable is disconnected, Centralized-NIDS automatically detects 0 packets received and raises an operational warning:
 ```text
-⚠ No traffic detected on SPAN interface 'eth1'.
-Check:
-  1. Switch SPAN session is configured and source ports are active.
-  2. Ethernet cable connects the switch mirror port to this interface.
-  3. VLAN trunking is enabled on the mirror port.
-  4. Delta-NIDS process is running with Administrator / root privileges.
+[WARN] Zero traffic observed on SPAN interface 'eth1' within watchdog window.
+Verify:
+  1. Switch mirror session configuration and administrative state.
+  2. Physical cable and link state on mirror destination port.
+  3. 802.1Q trunking / encapsulation replicate setting.
+  4. Operating system capture privileges.
 ```
 
-### 2. Live Dashboard Capture Status Panel
-In the web dashboard (`http://127.0.0.1:8081`):
-1. Navigate to the **Overview** page.
-2. The **Capture status** panel displays:
-   - **Capture Mode Badge**: Shows `SPAN MODE` in green.
-   - **Interface State**: Confirms link status and promiscuous mode.
-   - **Protocol Breakdown**: Live counters for IPv4, IPv6, 802.1Q VLAN, TCP, UDP, ICMP, and ICMPv6.
-   - **Duplicates Filtered**: Displays the count of deduplicated mirror frames.
-
-### 3. Quick Terminal Test
-Generate benign test traffic on the network to verify the SPAN capture is receiving packets:
-```bash
-# From any host on the monitored network:
-ping 8.8.8.8
-curl -I https://www.google.com
-```
-Observe the **Packets seen** counter increase immediately in the console and web dashboard.
+### 2. Live Web Console Metrics
+The **Capture Status** panel in the web console (`http://127.0.0.1:8081`) reports:
+* **Capture Mode Badge**: Displays `SPAN MODE` in green.
+* **Interface State**: Verifies link status and promiscuous capture.
+* **Protocol Distribution**: Live counters for IPv4, IPv6, 802.1Q VLAN, TCP, UDP, ICMP, and ICMPv6.
+* **Deduplication Counter**: Shows total duplicate mirror frames absorbed.

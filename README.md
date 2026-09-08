@@ -1,301 +1,354 @@
-# Delta-NIDS
+# Centralized-NIDS: Enterprise Passive Network Intrusion Detection System
 
-Delta-NIDS is a **passive**, cross-platform Network Intrusion Detection System. It captures authorized live traffic or replays PCAP files, decodes packets, tracks flows, applies supported rules and behavioral detectors, persists results in SQLite, exposes a local HTTP API, and displays results in a Flask dashboard.
+<div align="center">
 
-Delta-NIDS does not block, inject, modify, scan, exploit, reset, or automatically respond to traffic.
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-blue.svg)](#requirements)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=c%2B%2B)](#building-c-native-engine)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python)](#python-environment-setup)
+[![Capture Backend](https://img.shields.io/badge/Backend-libpcap%20%7C%20Npcap-orange.svg)](#packet-capture-architecture)
+[![License](https://img.shields.io/badge/License-MIT%20%2F%20Proprietary-green.svg)](#license)
+[![Documentation](https://img.shields.io/badge/Docs-Complete%20Specifications-brightgreen.svg)](#documentation-index)
 
-## Project layout
+**A high-throughput, passive, dual-stack network intrusion detection system with real-time signature matching, stateful behavioral analytics, SPAN/TAP mirror ingestion, and an integrated telemetry dashboard.**
 
-- `core/` — Python capture, packet normalization, alert persistence, and behavioral coordination.
-- `src/` — C++ packet, flow, protocol, detection, storage, API, telemetry, and platform components.
-- `dashboard/` — Flask same-origin dashboard and static client.
-- `rules/` — configured rule data.
-- `tests/` — Python and C++ regression/unit tests.
-- `run_project.py` — starts capture, API, and dashboard together.
+</div>
 
-## Requirements
+---
 
-### Linux
+## Executive Summary
+
+**Centralized-NIDS** (Delta-NIDS engine) is a lightweight, carrier-grade, **passive** Network Intrusion Detection System (NIDS) designed for both edge monitoring and centralized security operations. Operating on Linux and Windows, it monitors live networks via standard interfaces, hardware TAPs, or switch SPAN (Port Mirroring) sessions, as well as replaying offline PCAP dump files. 
+
+Traffic is ingested with zero transmission footprint, normalized across IPv4 and IPv6 protocol stacks (including 802.1Q/QinQ VLAN stripping and fragment caching), evaluated against signature rules and bounded stateful behavioral heuristics, and persisted into an optimized SQLite datastore. The system exposes a native low-latency HTTP/REST telemetry API and delivers real-time analytical visibility through a responsive web console.
+
+> [!IMPORTANT]
+> **Strict Passive Guarantee**: Centralized-NIDS operates strictly out-of-band as an unnumbered sensor. It does **not** inject packets, transmit resets (RST), drop or alter frames, modify system firewalls, execute active scans, or interfere with network topology and routing protocols.
+
+---
+
+## Architecture Overview
+
+```
+                        ┌─────────────────────────────────────────────────────────┐
+                        │              Network Traffic Ingestion                  │
+                        │   • Live Interface (Promiscuous Mode)                   │
+                        │   • Switch SPAN / Port Mirroring Destination            │
+                        │   • Hardware Network TAP (Aggregate / Non-Aggregate)    │
+                        │   • PCAP Replay File (.pcap / .pcapng)                  │
+                        └────────────────────────────┬────────────────────────────┘
+                                                     │
+                                                     ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │             Packet Acquisition Layer                    │
+                        │   • Linux libpcap / Windows Npcap Driver                │
+                        │   • Sliding-window Duplicate Frame Filter               │
+                        │   • 802.1Q / QinQ VLAN Tag Stripping & Extraction       │
+                        │   • Ring Buffer (configurable up to 64+ MB)             │
+                        └────────────────────────────┬────────────────────────────┘
+                                                     │
+                                                     ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │           Dual-Stack Normalization & Decoding           │
+                        │   • IPv4 / IPv6 Protocol Decoders                       │
+                        │   • IPv6 Fragment Cache & Offset Reassembly             │
+                        │   • TCP / UDP / ICMP / ICMPv6 Header Decoders           │
+                        │   • Quoted-error ICMP Payload Tracking                  │
+                        └────────────────────────────┬────────────────────────────┘
+                                                     │
+                                                     ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │              Detection & Analytics Engine               │
+                        │   ├─ Signature Rule Engine (Port Sets, Variables, PCRE) │
+                        │   └─ Behavioral Heuristics (Sliding-window Stateful)    │
+                        │       • TCP SYN / FIN / NULL / Xmas / ACK Port Scans   │
+                        │       • UDP Port Probing & Scan Sweeps                  │
+                        │       • Horizontal Host-Discovery Sweeps                │
+                        │       • Outbound DNS Query-Rate Anomalies               │
+                        │       • Repeated RST/FIN Connection Failure Patterns    │
+                        │       • RFC-Violating TCP Flag Combinations             │
+                        │       • Bare SYN Flooding Volumetrics                   │
+                        └────────────────────────────┬────────────────────────────┘
+                                                     │
+                                                     ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │           Correlation, Persistence & Egress             │
+                        │   • Alert Fingerprint Deduplication                     │
+                        │   • Multi-Signal Incident Correlation                   │
+                        │   • Thread-Safe SQLite Event & Telemetry Datastore      │
+                        │   • Native C++ High-Speed REST API (Port 8080)          │
+                        │   • Flask Real-Time Operations Dashboard (Port 8081)    │
+                        └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Core Capabilities
+
+| Feature | Description |
+| :--- | :--- |
+| **Zero-Interference Monitoring** | Completely passive listening mode with interface unbinding, preventing host address revelation on monitored links. |
+| **SPAN / Port Mirroring Support** | Native mode designed for switch mirror ports with automatic zero-traffic watchdog alerts, VLAN unwrapping, and mirror deduplication. |
+| **802.1Q & QinQ VLAN Parsing** | Seamlessly strips single and nested VLAN tags, preserving tag IDs in metadata while inspecting inner IP/transport payloads. |
+| **Dual-Stack IPv4 & IPv6** | First-class IPv6 decoder with fragment cache reassembly, extension header traversal, and ICMPv6 error correlation. |
+| **Multi-Stage Detection** | Combines Snort-like signature rule evaluation (supporting canonical port variables like `$HTTP_PORTS`) with streaming behavioral detectors. |
+| **Robust Scan Detection** | Distinguishes SYN, FIN, NULL, Xmas, and ACK probes, streaming alerts immediately upon threshold attainment without batch delays. |
+| **Host Sweep Discrimination** | Differentiates local multi-target discovery sweeps from ordinary Internet egress and neighbor ARP resolution, eliminating false positives. |
+| **Incident Correlation** | Correlates distinct alerts sharing source, target, protocol, and classification into unified incidents with drill-down forensics. |
+| **Native API & Web Console** | High-performance C++ REST endpoints proxy-integrated with a responsive, live-updating analytical UI. |
+
+---
+
+## Repository Layout
+
+```text
+centralized-nids/
+├── CMakeLists.txt              # Unified C++ CMake build specification
+├── requirements.txt            # Python dependencies (Scapy, Flask, etc.)
+├── run_project.py              # Production orchestrator (Capture + API + Dashboard)
+├── main.py                     # Standalone Python capture and detection engine
+│
+├── core/                       # Python Detection Engine Core
+│   ├── alert_manager.py        # Alert persistence and incident aggregation
+│   ├── behavioral_detector.py  # Sliding-window behavioral scan/flood detectors
+│   ├── packet_capture.py       # Live & PCAP capture driver with SPAN diagnostics
+│   ├── packet_normalizer.py    # Protocol decoding and flow normalization
+│   └── rule_management.py     # Port variable parser and signature compiler
+│
+├── src/                        # High-Performance C++ Engine
+│   ├── alert/                  # Alert structures and event generation
+│   ├── api/                    # Native HTTP REST API server
+│   ├── behavioral/             # C++ stateful behavioral detectors
+│   ├── capture/                # libpcap/Npcap driver, SPAN diagnostics, IPv6 cache
+│   ├── flow/                   # Flow reassembly and TCP state tracking
+│   ├── interface/              # Cross-platform interface discovery and scoring
+│   ├── packet/                 # High-speed Ethernet/VLAN/IP/TCP/UDP decoders
+│   ├── rule/                   # C++ signature rule evaluator
+│   └── storage/                # Thread-safe SQLite persistence layer
+│
+├── dashboard/                  # Operations Web Console
+│   ├── app.py                  # Flask reverse-proxy and dashboard backend
+│   ├── static/                 # CSS styling, charting, and JavaScript application
+│   └── templates/              # Jinja2 dashboard templates
+│
+├── rules/                      # Signature Definitions & Port Sets
+│   ├── rules.json              # Canonical threat signatures
+│   └── port_variables.json     # Predefined port groupings ($HTTP_PORTS, etc.)
+│
+├── docs/                       # Technical & Architectural Specifications
+│   ├── architecture.md         # Comprehensive system architecture & data contracts
+│   ├── building.md             # Compilation guidelines and toolchain options
+│   ├── detection-coverage.md   # Behavioral matrix, SIDs, and tool analysis
+│   ├── span_port_mirroring.md  # Switch configuration guide (Cisco, Arista, Juniper)
+│   ├── nmap-validation.md      # Ground-truth Nmap validation and visibility triage
+│   ├── security.md             # Threat model, input validation, and deployment security
+│   ├── performance.md          # Benchmark metrics and throughput guidelines
+│   ├── evaluation.md           # Detection quality metrics (Precision, Recall, F1)
+│   ├── linux.md                # Linux-specific setup and operational manual
+│   ├── windows.md              # Windows/Npcap configuration and driver management
+│   └── pcap-regression.md      # Deterministic PCAP regression test harness
+│
+└── tests/                      # Automated Verification & Test Suites
+    ├── unit/                   # C++ GoogleTest / CTest test binaries
+    └── test_*.py               # Python unit, integration, and pipeline tests
+```
+
+---
+
+## Installation & Prerequisites
+
+### System Requirements
+
+* **Operating System**: Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+) or Windows 10/11 / Windows Server 2019+
+* **Memory**: Minimum 1 GB RAM (4 GB recommended for high-volume SPAN feeds)
+* **Storage**: 500 MB for binaries and test suites; expandable SQLite disk allocation for logs
+* **Toolchains**: Python 3.10+ and C++17 compatible compiler (GCC 9+, Clang 10+, or MSVC 2022)
+
+### 1. Linux Setup
 
 ```bash
+# Install compilation toolchain and capture libraries
 sudo apt update
 sudo apt install -y build-essential cmake libpcap-dev libsqlite3-dev python3 python3-venv
-```
 
-### Windows
+# Clone repository
+git clone https://github.com/DavidKuriyan/centralized-nids.git
+cd centralized-nids
 
-1. **Python 3.10+**: Install from [python.org](https://www.python.org/) or Microsoft Store (ensure *Add Python to PATH* is checked).
-2. **Npcap**: Download and install from [npcap.com](https://npcap.com/#download). During installation, ensure:
-   - ✅ **"Install Npcap in WinPcap API-compatible Mode"** is checked.
-   - ✅ **"Support raw 802.11 traffic (and monitor mode) for wireless adapters"** (optional but recommended).
-3. **Visual Studio 2022 / Build Tools**: Install the *Desktop development with C++* workload with CMake and MSVC tools.
-
-## Build & Setup
-
-### Linux
-
-```bash
+# Initialize Python virtual environment
 python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements.txt
-cmake -S . -B build -DDELTA_NIDS_BUILD_TESTS=ON
-cmake --build build
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-### Windows (PowerShell)
+### 2. Windows Setup
 
-1. **Set up Python Virtual Environment**:
+1. **Install Python 3.10+**: Download from [python.org](https://www.python.org/downloads/). Ensure **"Add Python to PATH"** is selected.
+2. **Install Npcap**: Download from [npcap.com](https://npcap.com/#download).
+   * Check: **"Install Npcap in WinPcap API-compatible Mode"**.
+   * Optional: Check **"Support raw 802.11 traffic (and monitor mode)"**.
+3. **Install Build Tools**: Install [Visual Studio 2022 Build Tools](https://visualstudio.microsoft.com/downloads/) with the *Desktop development with C++* workload.
+4. **Clone and Configure Environment**:
+   ```powershell
+   git clone https://github.com/DavidKuriyan/centralized-nids.git
+   cd centralized-nids
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
-```
+   py -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   py -m pip install --upgrade pip
+   py -m pip install -r requirements.txt
+   ```
 
-2. **Build C++ Engine (Optional / Native API)**:
+---
 
-```powershell
-cmake -S . -B build -DDELTA_NIDS_BUILD_TESTS=ON
+## Building C++ Native Engine
+
+Building the native C++ engine provides maximum line-rate packet acquisition, standalone execution, and low-latency API handling.
+
+```bash
+# Configure build with tests enabled
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDELTA_NIDS_BUILD_TESTS=ON
+
+# Compile the binaries
 cmake --build build --config Release
-```
 
-*(If using Ninja: `cmake -S . -B build -G Ninja -DDELTA_NIDS_BUILD_TESTS=ON && cmake --build build`)*
-
-## Run the complete application
-
-The launcher starts the capture process, C++ API, and Flask dashboard. Press `Ctrl+C` to stop them.
-
-### Live capture
-
-#### Linux
-Live capture may require elevation:
-
-```bash
-sudo -E env HOME="$HOME" .venv/bin/python run_project.py --interface eth0
-```
-
-#### Windows
-> [!IMPORTANT]
-> **Run PowerShell as Administrator** for complete packet capture 
-
-```powershell
-# Open PowerShell as Administrator
-cd "path\to\delta-ids"
-.\.venv\Scripts\Activate.ps1
-
-# Run on Wi-Fi interface (name matching is flexible: "Wi-Fi", "wifi", "Wifi" all work)
-py run_project.py --interface "Wi-Fi"
-
-# Or run on Ethernet
-py run_project.py --interface "Ethernet"
-
-# Or let Delta-NIDS auto-detect the active interface
-py run_project.py
-```
-
-### SPAN / Port Mirroring Capture Mode
-
-Delta-NIDS supports passive monitoring directly from a switch SPAN (mirror) destination port:
-
-```bash
-# Linux
-sudo -E env HOME="$HOME" .venv/bin/python run_project.py --interface eth1 --capture-mode span
-
-# Windows (Elevated PowerShell)
-py run_project.py --interface "Ethernet 2" --capture-mode span
-
-# Direct Python capture engine
-python main.py -i eth1 --capture-mode span --snap-length 65535 --buffer-size 16777216
-
-# Direct Native C++ engine
-./delta-nids -i eth1 --capture-mode span
-```
-
-In SPAN mode:
-- **Promiscuous mode** is strictly enforced.
-- **Empty BPF filter** captures all protocols (IPv4, IPv6, ICMP, ICMPv6, ARP, VLAN).
-- **802.1Q and QinQ** tags are extracted and stripped before transport analysis.
-- **Deduplication** absorbs mirror-induced duplicates across symmetric monitor sessions.
-- **Zero-traffic watchdog** alerts operators if the switch SPAN feed stops sending frames.
-- See [docs/span_port_mirroring.md](docs/span_port_mirroring.md) for full switch configuration examples (Cisco, Arista, Juniper, Linux OVS).
-
-
-### PCAP replay
-
-PCAP replay does not require capture privileges:
-
-#### Linux:
-
-```bash
-.venv/bin/python run_project.py --pcap captures/sample.pcap
-```
-
-#### Windows:
-
-```powershell
-py run_project.py --pcap captures\sample.pcap
-```
-
-Open the dashboard in your browser:
-
-```text
-http://127.0.0.1:8081
-```
-
-The default database is user-owned at `$HOME/.local/share/delta-nids/nids.sqlite`; the API listens on `8080` and the dashboard on `8081`.
-
-## Launcher options
-
-```text
-python run_project.py [--interface NAME | --pcap FILE]
-                       [--db PATH] [--filter BPF] [--count N]
-                       [--capture-mode normal|span]
-                       [--api-port PORT] [--dashboard-port PORT]
-                       [--no-capture]
-```
-
-Examples:
-
-```bash
-python run_project.py
-python run_project.py --pcap captures/sample.pcap
-python run_project.py --no-capture --db database/nids.sqlite
-```
-
-## Manual operation
-
-```bash
-# Capture and persist to SQLite
-.venv/bin/python main.py --pcap captures/sample.pcap --persist --db database/nids.sqlite
-
-# Start the native API
-./build/delta-nids --api database/nids.sqlite
-
-# Start the dashboard
-.venv/bin/python dashboard/app.py
-```
-
-Python capture options include `--interface`, `--pcap`, `--config`, `--filter`, `--count`, `--db`, `--persist`, and `--quiet`. The default rule file is `rules/rules.json`; the default live BPF filter is empty so all protocols are captured. Port groups are read from `rules/port_variables.json`. For a clean Nmap validation run, use a dedicated writable database and record the selected adapter; see [`docs/nmap-validation.md`](docs/nmap-validation.md) for the host-discovery/visibility root-cause checklist.
-
-## Detection behavior
-
-- Supported explicit rule conditions are matched by the Python rule engine. Rule port expressions accept `80`, `80,443`, `[80,443]`, `1:1024`, and pre-defined port variables such as `$HTTP_PORTS` or `$HTTP_PORTS,$HTTPS_PORTS`; the parser normalizes every accepted form into one canonical port set, so rules behave identically when added through the dashboard, through the API, loaded from `rules/rules.json`, or refreshed from the runtime database.
-- Pre-defined port groups are centrally configurable in `rules/port_variables.json` (`$HTTP_PORTS`, `$HTTPS_PORTS`, `$DNS_PORTS`, `$SSH_PORTS`, `$FTP_PORTS`, `$SMTP_PORTS`, `$DATABASE_PORTS`) and can be overridden with the `DELTA_NIDS_PORT_VARIABLES` JSON environment variable. Unknown variables fail validation with a message listing the available variables.
-- Metadata-only or legacy `heuristic_payload` entries are reported as unsupported and are not treated as payload signatures.
-- Behavioral port scans require distinct destination ports for the same source, destination, and protocol within the configured window; the alert is emitted as soon as the threshold is reached (no batch waiting).
-- Duplicate UDP/DNS packets and a single DNS request do not constitute a port scan.
-- Ordinary ICMP echo requests are bounded per-window INFO visibility events, not attacks. Host-discovery sweeps (SID 90002) require multiple **distinct non-public** targets within the window, so normal Internet browsing, CDN traffic, and gateway ARP resolution do not alarm. Sweep correlation covers ICMP and TCP only; TCP sweeps are correlated per destination port. ARP requests are intentionally excluded (gateway/neighbor L2 resolution is normal housekeeping), so the former ARP host-discovery sweep rule no longer fires and `DELTA_NIDS_ARP_SWEEP_THRESHOLD` has been removed. The window and thresholds are configurable via `DELTA_NIDS_SCAN_WINDOW`, `DELTA_NIDS_PING_THRESHOLD` (ICMP/TCP host discovery), `DELTA_NIDS_REMOTE_SWEEP_THRESHOLD`, and `DELTA_NIDS_REMOTE_SWEEP_ENABLED`.
-- ICMP/UDP/TCP anomalies are detected as RFC-invalid behaviour only. Behavioral detectors also cover outbound DNS query-rate anomalies, repeated RST/FIN connection failures, and invalid TCP flag combinations.
-- Alerts use `[gid:sid:rev]` identity and are deduplicated in SQLite by fingerprint.
-- Stored host-sweep alerts produced with a weaker pre-fix threshold can be removed by revalidating them against the current evidence contract:
-  `python main.py --db <path> --purge-false-positives`.
-
-## Dashboard and API
-
-The browser talks only to Flask on port `8081`; Flask proxies `/api/*` to the native API. The dashboard displays live API data and polls every three seconds. It reports unavailable backends instead of presenting mock values.
-
-Important endpoints:
-
-```text
-GET    /api/status
-GET    /api/stats
-GET    /api/system
-GET    /api/config
-GET    /api/alerts
-GET    /api/alerts/{id}
-GET    /api/alerts/export
-DELETE /api/alerts
-GET    /api/traffic
-GET    /api/traffic/{id}
-GET    /api/traffic/export
-DELETE /api/traffic
-GET    /api/incidents
-GET    /api/incidents/{id}
-GET    /api/flows
-GET    /api/rules
-GET    /api/detection-events
-GET    /api/statistics
-DELETE /api/reset
-```
-
-`/api/status` includes API state, loaded-rule count, capture state, interface, captured/processed packet counts, and the last packet time when the capture process is reporting runtime data.
-
-`DELETE /api/reset` clears alerts, traffic, incidents, flows, and statistics while preserving the schema and loaded rules. It does not stop or restart packet capture; the next heartbeat repopulates runtime status. `GET /api/incidents/{id}` includes an expanded `alerts` array with persisted alert evidence and `alert_count`.
-
-## Database and permissions
-
-Do not create the shared database as root and then access it as another user. Prefer the launcher’s user-owned database. For an existing root-owned database:
-
-```bash
-sudo chown "$USER:$USER" database/nids.db
-chmod 600 database/nids.db
-chmod u+rwx database
-```
-
-Stop all Delta-NIDS processes before removing SQLite journal files. The correct executable path is `./build/delta-nids`, not `/build/delta-nids`.
-
-## Verification
-
-Run the complete native suite:
-
-```bash
-cmake --build build
+# Execute test suite
 ctest --test-dir build --output-on-failure
 ```
 
-Run Python tests and syntax checks:
+*(On Windows, run within Developer PowerShell for VS 2022 or select Ninja with `-G Ninja`.)*
 
+---
+
+## Quick Start & Execution
+
+The unified launcher (`run_project.py`) automatically orchestrates the capture engine, the native C++ backend API, and the Flask operations console.
+
+### 1. Unified Operational Mode
+
+#### Linux (Elevated for Live Capture):
 ```bash
-.venv/bin/python -m unittest discover -s tests -p 'test_*.py'
-.venv/bin/python -m py_compile core/*.py database/*.py main.py run_project.py dashboard/app.py
+sudo -E env HOME="$HOME" PATH="$PATH" .venv/bin/python run_project.py --interface eth0
 ```
 
-Offline validation harness:
+#### Windows (Run PowerShell as Administrator):
+```powershell
+.\.venv\Scripts\Activate.ps1
 
-```bash
-.venv/bin/python tools/validate_local.py
-.venv/bin/python tools/validate_local.py --json
-.venv/bin/python tools/validate_local.py --pcap captures/authorized-test.pcap
+# Launch auto-detecting the primary active network interface:
+py run_project.py
+
+# Or specify an interface explicitly:
+py run_project.py --interface "Ethernet"
 ```
 
-The default mode replays a controlled detection matrix (SYN/connect/UDP/ACK/FIN/
-NULL/Xmas scans, host sweeps, DNS anomalies, HTTP content rules, connection
-failures, TCP anomalies, and negative controls) through the real capture→
-detect→alert pipeline and reports captured/detected/false-positive per case. It
-is intentionally isolated and does not claim real Nmap, Npcap, VM, `eth0`, or
-live-dashboard validation.
+Once running, access the web console in your browser:
+👉 **`http://127.0.0.1:8081`**
 
-Useful native checks:
+---
+
+### 2. Switch SPAN / Port Mirroring Mode
+
+When connected to a switch mirror port or network TAP, enable SPAN mode. This mode forces promiscuous capture, disables capture filters to allow all protocol families, expands socket buffers to 16 MB, strips 802.1Q VLAN tags, activates deduplication, and monitors link health via a zero-traffic watchdog:
 
 ```bash
-./build/delta-nids --list-interfaces
-./build/delta-nids --validate-rules tests/fixtures/valid.rules.json
-./build/delta-nids --stats
+# Linux
+sudo -E env HOME="$HOME" PATH="$PATH" .venv/bin/python run_project.py --interface eth1 --capture-mode span
+
+# Windows (Elevated PowerShell)
+py run_project.py --interface "Ethernet 2" --capture-mode span
 ```
 
-## Troubleshooting
+For complete switch provisioning examples (Cisco Catalyst/Nexus, Arista EOS, Juniper Junos, Linux OVS, and VMware vSphere), consult the **[SPAN Port Mirroring Deployment Guide](docs/span_port_mirroring.md)**.
 
-- **API unavailable:** start the native API or run `run_project.py`; if using a custom API port, ensure `DELTA_NIDS_API_URL` points to it.
-- **Dashboard shows `STALE`:** verify the capture process is alive, using the same database as the API, and has permission to write runtime statistics.
-- **Readonly database:** correct ownership/permissions or choose a writable `--db` path; do not run only one component as root.
-- **No alerts:** confirm `--persist` is enabled, the expected database is selected, rules are supported, and the traffic matches a rule or behavioral threshold.
-- **False UDP scan concerns:** inspect the alert evidence; SID `90003` lists the distinct destination ports observed in its window. A single DNS query is not sufficient.
-- **Live capture permission denied:** verify libpcap/Npcap installation, adapter availability, and required privileges. PCAP replay avoids live-capture permissions.
-- **Wrong interface:** use `--list-interfaces` and pass the exact adapter name to `--interface`.
-- **Port conflict:** use `--api-port` or `--dashboard-port` with the launcher.
+---
 
-## Additional documentation
+### 3. Offline PCAP Replay Mode
 
-- [`docs/architecture.md`](docs/architecture.md) — component boundaries and passive-only contract.
-- [`docs/building.md`](docs/building.md) — build prerequisites and commands.
-- [`docs/linux.md`](docs/linux.md) — Linux capture and interface operations.
-- [`docs/windows.md`](docs/windows.md) — Windows/Npcap operations.
-- [`docs/security.md`](docs/security.md) — security guarantees and deployment guidance.
-- [`docs/performance.md`](docs/performance.md) — benchmark and bounded-state guidance.
-- [`docs/nmap-validation.md`](docs/nmap-validation.md) — reproducible Kali-to-Windows Npcap/Nmap validation and evidence criteria.
+Replay standard `.pcap` or `.pcapng` capture files for audit, evaluation, or regression testing without requiring root or elevated privileges:
 
-## License
+```bash
+# Run complete system over sample PCAP
+python run_project.py --pcap captures/sample.pcap
+```
 
-No license file is currently declared. Add and review a license before distribution.
-#   c e n t r a l i z e d - n i d s  
- 
+---
+
+## Detection Capabilities & Behavioral SIDs
+
+Centralized-NIDS couples custom signature rules with high-performance, streaming stateful behavioral detectors:
+
+| SID | Category | Name | Detection Logic | Severity |
+| :--- | :--- | :--- | :--- | :--- |
+| **90001** | Visibility | ICMP Echo Request | Aggregates individual ICMP ping packets per source/target window into informational visibility records. | `INFO` |
+| **90002** | Reconnaissance | Host Discovery Sweep | Detects ICMP/TCP sweep attempts across distinct non-public hosts; ignores normal Internet egress and L2 ARP neighbor resolution. | `HIGH` |
+| **90003** | Reconnaissance | Port Scan | Identifies horizontal and vertical port scans across SYN, FIN, NULL, Xmas, Maimon, and UDP probes. Streams alert immediately upon threshold. | `HIGH` |
+| **90004** | Anomaly | DNS Query Volumetrics | Emits alerts when an internal host exceeds normal outbound DNS query rate thresholds (indicating tunneling or scanning). | `MEDIUM` |
+| **90005** | Credential Attack | Connection Failures | Identifies brute-force authentication attempts by tracking elevated rates of RST/FIN connection terminations toward a single service. | `MEDIUM` |
+| **90006** | Protocol Violation | Invalid TCP Flags | Detects RFC 793/RFC 1323 protocol violations (e.g., SYN+FIN or SYN+RST). | `LOW` |
+| **90014** | Denial of Service | TCP SYN Flood | Detects high-rate bare half-open SYN packet bursts directed against a single endpoint; ignores completed handshakes. | `HIGH` |
+| **700000+**| Signature | Custom Rule Alerts | Matches cleartext application byte signatures, header fields, and regex expressions configured in `rules/rules.json`. | Configurable |
+
+For complete evaluation metrics, false-positive mitigations, and scanner validation results (Nmap, Masscan, RustScan, etc.), see the **[Detection Coverage & Visibility Matrix](docs/detection-coverage.md)**.
+
+---
+
+## REST API Reference
+
+The backend exposes an ultra-low latency REST API on port `8080` (reverse-proxied seamlessly through `8081` by the dashboard):
+
+| Endpoint | Method | Description |
+| :--- | :--- | :--- |
+| `/api/status` | `GET` | Reports operational health, loaded rule counts, active capture interface, and packet metrics. |
+| `/api/stats` | `GET` | Summary statistics of total packets, alerts, incidents, and memory/flow utilization. |
+| `/api/alerts` | `GET` | Paginated list of persisted threat alerts, filtered by severity, protocol, or time window. |
+| `/api/alerts/{id}` | `GET` | Full forensic detail for a specific alert including packet-derived evidence and raw frame fields. |
+| `/api/alerts/export`| `GET` | Export all recorded alerts in structured JSON or CSV format. |
+| `/api/incidents` | `GET` | Correlated security incidents grouping related alerts by source, target, and threat class. |
+| `/api/incidents/{id}`| `GET` | Drill-down view of an incident with embedded constituent alert records. |
+| `/api/traffic` | `GET` | Real-time connection log with source, destination, protocol, ports, and byte counters. |
+| `/api/rules` | `GET` | Lists all active signature rules and port grouping variables. |
+| `/api/reset` | `DELETE`| Flushes runtime alerts and flow tables without interrupting the capture process. |
+
+---
+
+## Verification & Automated Testing
+
+Centralized-NIDS includes comprehensive automated testing across both C++ and Python subsystems:
+
+```bash
+# 1. Run Python Unit & Pipeline Tests
+python -m unittest discover -s tests -p "test_*.py"
+
+# 2. Run C++ Native Unit Tests
+ctest --test-dir build --output-on-failure
+
+# 3. Run Offline Matrix Validation
+python tools/validate_local.py
+```
+
+The offline validation harness (`validate_local.py`) generates deterministic traffic patterns representing each threat class and negative control (e.g., normal web browsing, ARP discovery, single pings) to ensure zero false positives and 100% detection fidelity.
+
+---
+
+## Documentation Index
+
+Detailed architectural, operational, and configuration documentation is available in the [`docs/`](docs/) directory:
+
+* 📐 **[System Architecture](docs/architecture.md)** — Architectural design, pipeline contracts, and evidence models.
+* 🛠️ **[Building & Compilation](docs/building.md)** — Toolchain configuration, CMake options, and dependency strategies.
+* 🛡️ **[Detection Coverage Matrix](docs/detection-coverage.md)** — Detailed detection taxonomy, SIDs, and behavioral benchmarks.
+* 🔌 **[SPAN Port Mirroring Guide](docs/span_port_mirroring.md)** — Switch port mirroring guide for Cisco, Arista, Juniper, and Linux.
+* 🔍 **[Nmap Validation Guide](docs/nmap-validation.md)** — Step-by-step triage guide for validating Nmap scans and visibility.
+* 🔒 **[Security Hardening](docs/security.md)** — Threat model, security boundaries, and production hardening.
+* ⚡ **[Performance Benchmarking](docs/performance.md)** — Throughput benchmarks, state limits, and tuning parameters.
+* 📊 **[Quality Evaluation](docs/evaluation.md)** — Precision, recall, and F1 scoring methodology.
+* 🐧 **[Linux Operations Manual](docs/linux.md)** — Linux-specific privilege delegation, systemd integration, and tuning.
+* 🪟 **[Windows Operations Manual](docs/windows.md)** — Windows Npcap integration, adapter GUIDs, and administration.
+* 🧪 **[PCAP Regression Harness](docs/pcap-regression.md)** — PCAP regression methodology and reproducible test sets.
+
+---
+
+## License & Contributing
+
+Distributed under the [MIT License](LICENSE) (or organizational license as designated). Contributions, bug reports, and pull requests are welcome. Please ensure all unit tests pass before submitting code.

@@ -1,28 +1,43 @@
-# Security hardening
+# Security Hardening & Threat Model Specification
 
-Delta-NIDS treats packet bytes, PCAP files, rule files, and API input as
-untrusted data.
+Centralized-NIDS operates on the security premise that all packet bytes, PCAP files, external rule definitions, and API client requests represent untrusted, potentially adversarial inputs.
 
-## Guarantees
+---
 
-- Packet parsers perform bounds checks before reading headers or lengths.
-- Malformed input returns a decode error instead of terminating the process.
-- Rule parsing rejects unsupported and active actions.
-- The API accepts only bounded GET requests and limits query fields.
-- Storage uses parameterized SQLite statements for persisted values.
-- Flow, alert, incident, and write-queue state is bounded by configuration.
-- The dashboard binds to localhost by default.
-- No packet injection, TCP reset, blocking, firewall changes, active scans, or
-automated response actions exist in the common engine.
+## 1. Security Architecture & Invariants
 
-## Deployment guidance
+Centralized-NIDS enforces key defensive architectural guarantees:
 
-Run live capture with the minimum privileges required by libpcap/Npcap. Keep the
-REST API on loopback unless an authenticated reverse proxy and explicit network
-policy are provided. Treat rule and PCAP paths as operator-controlled inputs and
-avoid writable shared directories for production databases or logs.
+* **Strict Input Bounds Checking**: All packet parsing routines perform explicit byte boundary validation prior to accessing headers, lengths, offsets, or payload slices, eliminating buffer over-read and under-read vulnerabilities.
+* **Resilient Error Containment**: Malformed or deliberately corrupt packets generate decode error status codes and increment telemetry failure counters without halting the capture process.
+* **Passive Isolation**: The core engine contains no routines capable of injecting packets, transmitting TCP resets, modifying operating system firewalls, altering routing tables, or triggering automated active responses.
+* **Parameterized Persistence**: All database interactions with SQLite use strictly parameterized SQL queries, completely eliminating SQL injection vectors.
+* **Bounded Resource Allocation**: Flow records, behavioral scan caches, fragment tables, and persistence queues are hard-bounded to prevent memory exhaustion and algorithmic complexity attacks.
+* **Local-First API Exposure**: The native C++ HTTP REST API and Flask dashboard bind to `127.0.0.1` (loopback) by default.
 
-Security tests cover malformed Ethernet input, passive-action rejection, invalid
-storage configuration, request-size enforcement, malformed HTTP requests, and
-bounded API query parsing. Fuzzing and sanitizer runs should be added to CI for
-future releases.
+---
+
+## 2. Threat Model Analysis
+
+| Threat Vector | Potential Impact | Mitigation Strategy |
+| :--- | :--- | :--- |
+| **Malformed Packet Floods** | Process crash / DoS | Defensive decoding with explicit slice bounds; exceptions caught and logged to telemetry counters. |
+| **State Table Exhaustion** | Memory exhaustion / OOM | Hard-bounded flow maps with LRU eviction and sliding-window expiration timers. |
+| **ReDoS (Regular Expression DoS)** | High CPU consumption | Rule compilation validates PCRE patterns for catastrophic backtracking risks. |
+| **SQL Injection** | Database corruption | Exclusive use of prepared statements and parameterized bindings across all queries. |
+| **Sensor Network Exposure** | Host discovery on mirror link | Unnumbered listener configuration: disabling IPv4 ARP and IPv6 auto-configuration on the capture NIC. |
+| **API Abuse / Flooding** | Denial of service to console | Query limits on `/api/alerts` and `/api/traffic`; loopback binding by default. |
+
+---
+
+## 3. Production Deployment Hardening
+
+### Principle of Least Privilege
+* **Linux**: Rather than running the entire NIDS suite as `root`, grant only capture capabilities (`CAP_NET_RAW`, `CAP_NET_ADMIN`) to the capture binary or use an unprivileged user group for capture device access.
+* **Windows**: Run the capture service under a dedicated service account possessing Npcap driver access rights.
+
+### Network Ingress Isolation
+For SPAN / mirror links:
+1. Strip IP addresses from the sensor NIC (unbind IPv4/IPv6 stacks).
+2. Disable ARP replies and neighbor discovery on the listening interface.
+3. Keep the Web Console and REST API behind an authenticated reverse proxy (e.g., NGINX with TLS and mutual authentication) if remote operations access is required.

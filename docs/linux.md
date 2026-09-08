@@ -1,61 +1,112 @@
-# Linux operations
+# Linux Operations Manual
 
-Delta-NIDS uses libpcap for both live capture and offline PCAP replay. The common
-packet and detection pipeline is independent of Linux-specific interfaces.
+This guide outlines setup, privilege management, interface discovery, systemd service configuration, and troubleshooting for Centralized-NIDS on Linux systems.
 
-## Build and test
+---
+
+## 1. System Requirements & Installation
+
+Centralized-NIDS supports modern Linux distributions including Ubuntu 20.04+, Debian 11+, and RHEL 8+.
+
+### Package Installation
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake libpcap-dev libsqlite3-dev python3 python3-venv python3-pip
+```
+
+### Repository & Python Setup
+```bash
+git clone https://github.com/DavidKuriyan/centralized-nids.git
+cd centralized-nids
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+---
+
+## 2. Compilation & Verification
 
 ```bash
-sudo apt install build-essential cmake libpcap-dev libsqlite3-dev
-cmake -S . -B build -DDELTA_NIDS_BUILD_TESTS=ON
-cmake --build build
+# Build native engine and tests
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDELTA_NIDS_BUILD_TESTS=ON
+cmake --build build --config Release -j$(nproc)
+
+# Run test suite
 ctest --test-dir build --output-on-failure
 ```
 
-## Interface discovery
+---
 
-List actual adapters and deterministic suitability scores:
+## 3. Network Interface Discovery & Configuration
+
+### Interface Discovery
+List all physical and virtual interfaces alongside the engine's deterministic suitability ranking:
 
 ```bash
 ./build/delta-nids --list-interfaces
 ```
 
-With no interface override, the manager selects the highest-ranked suitable
-adapter. To select one explicitly:
+The auto-selection algorithm ranks adapters based on link state, loopback avoidance, and promiscuous capabilities. To specify an adapter explicitly:
 
 ```bash
 ./build/delta-nids --interface eth0
 ```
 
-Interface names are discovered from the operating system; `eth0` is only an
-example. Loopback and disconnected interfaces are not selected automatically
-when a suitable active adapter exists.
+### Capture Privileges
+Live packet acquisition requires access to raw sockets. Two deployment methods are supported:
 
-## Capture privileges
-
-Live capture may require root or Linux capabilities, depending on the libpcap
-installation and interface policy. Prefer granting the executable only the
-capabilities required by the deployment rather than running unrelated services
-as root. If capture cannot be opened, inspect the interface and driver with
-`--list-interfaces`, then run with the required authorization. PCAP replay does
-not require capture privileges:
-
+#### Method A: Linux Capabilities (Recommended / Non-Root)
+Grant capture capabilities to the Python or native binary:
 ```bash
-./build/delta-nids --pcap captures/sample.pcap
+sudo setcap cap_net_raw,cap_net_admin=eip build/delta-nids
 ```
 
-Delta-NIDS is passive: it does not inject packets, send resets, block hosts, or
-modify firewall rules.
-
-## Operational checks
-
+#### Method B: Elevated Execution
 ```bash
-./build/delta-nids --stats
-./build/delta-nids --validate-rules tests/fixtures/valid.rules.json
+sudo -E env HOME="$HOME" PATH="$PATH" .venv/bin/python run_project.py --interface eth0
 ```
 
-`--stats` prints process-local telemetry counters. For live capture failures,
-check that libpcap development/runtime files are installed, the adapter is up,
-and the process has capture permission. BPF filters and snap length are passed
-to libpcap; unsupported backend behavior must be reported rather than silently
-emulated.
+*Note: Offline PCAP replay does not require any elevated privileges.*
+
+---
+
+## 4. Production Service Deployment (systemd)
+
+To run Centralized-NIDS as a continuous background daemon on Linux, create a systemd service unit:
+
+```ini
+# /etc/systemd/system/centralized-nids.service
+[Unit]
+Description=Centralized Network Intrusion Detection System
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/centralized-nids
+ExecStart=/opt/centralized-nids/.venv/bin/python run_project.py --interface eth0 --capture-mode span
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable centralized-nids
+sudo systemctl start centralized-nids
+sudo systemctl status centralized-nids
+```
+
+---
+
+## 5. Troubleshooting & Diagnostics
+
+* **libpcap failure upon initialization**: Ensure `libpcap-dev` is installed and the capture interface is in an `UP` operational state (`ip link show <interface>`).
+* **Zero packets captured**: Verify that the interface is receiving frames using an independent `tcpdump -i <interface> -nn -c 10`.
+* **Database lock / Permission denied**: Ensure the directory containing the SQLite database is writable by the user running the engine.
