@@ -12,9 +12,10 @@ const INFORMATIONAL = new Set(['LOW', 'INFO']);
 // raised at connection scope), so only the address is shown.
 function endpoint(ip, port, table = false) {
     if (ip == null || ip === '') return '—';
-    if (String(ip).includes(':')) return '—';
-    if (port == null || port === '' || Number(port) === 0) return String(ip);
-    return `${ip}:${port}`;
+    const s = String(ip);
+    const isIpv6 = s.includes(':');
+    if (port == null || port === '' || Number(port) === 0) return s;
+    return isIpv6 ? `[${s}]:${port}` : `${s}:${port}`;
 }
 // The alert queue is a threat view: informational visibility events (LOW/INFO
 // such as SSH banner observation and ICMP echo notices) are hidden unless the
@@ -62,11 +63,41 @@ async function refresh() {
     const refreshButton = $('refresh');
     if (refreshButton) { refreshButton.disabled = true; refreshButton.textContent = 'Refreshing…'; }
     try {
-        const [status, stats, system, config] = await Promise.all([api('/api/status'), api('/api/stats'), api('/api/system'), api('/api/config')]);
+        const [status, stats, system, config, capStats] = await Promise.all([
+            api('/api/status'),
+            api('/api/stats'),
+            api('/api/system'),
+            api('/api/config'),
+            api('/api/capture/stats').catch(() => null)
+        ]);
         value('metric-packets', number(stats.packets_processed)); value('metric-alerts', number(stats.alerts)); value('metric-incidents', number(stats.incidents));
         value('engine-status', status.status); value('system-platform', system.platform); value('system-timezone', system.timezone_name); value('api-bind', `${config.api_host}:${config.api_port}`);
         if ($('runtime')) $('runtime').innerHTML = [['API status', status.api_status === 'connected' ? 'Connected' : 'Unavailable'], ['Detection engine', status.detection_engine || status.status], ['Capture status', status.capture_activity || status.capture_status || 'Not reported by backend'], ['Interface', status.interface || 'See capture process configuration'], ['Packets captured', number(status.packets_captured ?? stats.packets_received ?? 0)], ['Packets processed', number(stats.packets_processed)], ['Packet processing failures', number(status.packets_failed ?? 0)], ['Last packet', status.last_packet_time ? time(status.last_packet_time) : 'Not observed'], ['Rules loaded', number(status.rules_loaded)], ['Runtime', system.uptime_seconds == null ? 'Not reported by backend' : `${number(system.uptime_seconds)} seconds`]].map(([key, val]) => `<div><dt>${esc(key)}</dt><dd>${esc(val)}</dd></div>`).join('');
         updateClock(system); const badge = $('api-status'); if (badge) { badge.textContent = 'API CONNECTED'; badge.className = 'status status-ok'; } notice('');
+        if (capStats && capStats.status !== 'no_data') {
+            const mode = String(capStats.capture_mode || 'normal').toUpperCase();
+            const badge = $('capture-mode-badge');
+            if (badge) {
+                badge.textContent = `${mode} MODE`;
+                badge.className = mode === 'SPAN' ? 'status status-ok' : 'status';
+            }
+            const warn = $('capture-warning-banner');
+            if (warn) warn.hidden = !capStats.zero_traffic_warning;
+            value('cap-interface', capStats.capture_interface || '—');
+            value('cap-mode', mode);
+            value('cap-promisc', 'YES (Promiscuous)');
+            value('cap-state', capStats.status || '—');
+            value('cap-packets', number(capStats.packets_captured));
+            value('cap-duplicates', number(capStats.duplicate_packets));
+            value('cap-malformed', number(capStats.malformed_packets));
+            value('cap-ipv4', number(capStats.ipv4_packets));
+            value('cap-ipv6', number(capStats.ipv6_packets));
+            value('cap-vlan', number(capStats.vlan_packets));
+            value('cap-tcp', number(capStats.tcp_packets));
+            value('cap-udp', number(capStats.udp_packets));
+            value('cap-icmp', number(capStats.icmp_packets));
+            value('cap-icmpv6', number(capStats.icmpv6_packets));
+        }
         await Promise.all([loadAlerts(state.alertSearch), $('traffic-table') ? loadTraffic(state.trafficSearch) : Promise.resolve(), $('incidents-table') ? loadIncidents(state.incidentSearch) : Promise.resolve(), $('rules-table') ? loadRules(state.ruleSearch) : Promise.resolve()]);
     } catch (error) { notice(error.message); if ($('runtime')) $('runtime').innerHTML = '<div class="notice error">Backend unavailable</div>'; value('engine-status', 'API unavailable'); const badge = $('api-status'); if (badge) { badge.textContent = 'API UNAVAILABLE'; badge.className = 'status status-down'; } }
     finally { state.refreshInFlight = false; if (refreshButton) { refreshButton.disabled = false; refreshButton.textContent = 'Refresh now'; } }

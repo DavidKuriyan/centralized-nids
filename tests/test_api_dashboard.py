@@ -49,7 +49,7 @@ class DashboardProxyTests(unittest.TestCase):
         self.assertIn(b"Delta", response.data)
 
     def test_traffic_table_hides_ipv6(self):
-        script = (Path(__file__).parents[1] / "dashboard" / "static" / "js" / "main.js").read_text()
+        script = (Path(__file__).parents[1] / "dashboard" / "static" / "js" / "main.js").read_text(encoding="utf-8")
         self.assertIn("return '—';", script)
         self.assertNotIn("IPv6 address (open details)", script)
         self.assertIn("endpoint(item.src_ip, item.src_port, true)", script)

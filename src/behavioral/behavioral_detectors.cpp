@@ -32,9 +32,20 @@ std::string probe_class(std::uint8_t flags) {
 
 bool is_host_discovery_probe(const packet::Packet& packet) {
     if (packet.transport == packet::TransportProtocol::icmp && packet.icmp)
-        return packet.icmp->type == 8; // IPv4 echo request
-    if (packet.transport == packet::TransportProtocol::icmpv6 && packet.icmp)
-        return packet.icmp->type == 128; // IPv6 echo request
+        return packet.icmp->type == 8; // IPv4 Echo Request
+    if (packet.transport == packet::TransportProtocol::icmpv6 && packet.icmp) {
+        // ICMPv6 Echo Request (128) is a host-discovery probe.
+        // ICMPv6 Neighbor Discovery types (133-137) are normal IPv6 operations
+        // and must NOT be treated as reconnaissance probes:
+        //   133 Router Solicitation
+        //   134 Router Advertisement
+        //   135 Neighbor Solicitation
+        //   136 Neighbor Advertisement
+        //   137 Redirect
+        const auto t = packet.icmp->type;
+        if (t >= 133 && t <= 137) return false;
+        return t == 128; // Echo Request only
+    }
     if (packet.transport == packet::TransportProtocol::tcp && packet.tcp)
         return (packet.tcp->flags & 0x02U) != 0 &&
                (packet.tcp->flags & (0x10U | 0x04U)) == 0;
@@ -55,6 +66,9 @@ public:
     explicit PortScanDetector(BehavioralConfig config) : config_(config) {}
     void observe(const packet::Packet& packet, const flow::Flow& flow, std::vector<BehavioralEvent>& events) override {
         if (!packet.source_port || !packet.destination_port || packet.transport == packet::TransportProtocol::icmp) return;
+        // Skip ICMPv6 entirely — it has no ports and ND traffic must not be
+        // classified as a port scan.
+        if (packet.transport == packet::TransportProtocol::icmpv6) return;
         std::string scan_class;
         if (packet.transport == packet::TransportProtocol::tcp && packet.tcp) {
             scan_class = probe_class(packet.tcp->flags);
@@ -112,19 +126,35 @@ private:
     std::map<std::string, State> states_;
 };
 
-// Globally-routable (Internet) destinations are ordinary client egress. Host
-// discovery is local-network reconnaissance, so sweep correlation must not
-// count Internet destinations against the threshold.
+// Returns true when the address is globally routable (i.e. an Internet destination).
+// Globally-routable destinations are ordinary client egress and should NOT be
+// counted toward local host-sweep thresholds.
 bool is_globally_routable(const packet::IpAddress& address) {
-    if (address.family == packet::AddressFamily::ipv6) return false; // conservative: count v6 as eligible
+    if (address.family == packet::AddressFamily::ipv6) {
+        if (address.bytes.size() < 16) return false;
+        // Link-local: fe80::/10
+        if ((address.bytes[0] == 0xfe) && ((address.bytes[1] & 0xc0U) == 0x80U)) return false;
+        // Loopback: ::1
+        if (std::all_of(address.bytes.begin(), address.bytes.begin() + 15,
+                        [](std::uint8_t b) { return b == 0; }) && address.bytes[15] == 1)
+            return false;
+        // Unique-local (ULA): fc00::/7
+        if ((address.bytes[0] & 0xfeU) == 0xfcU) return false;
+        // Multicast: ff00::/8
+        if (address.bytes[0] == 0xff) return false;
+        // Unspecified ::
+        if (std::all_of(address.bytes.begin(), address.bytes.end(),
+                        [](std::uint8_t b) { return b == 0; })) return false;
+        return true; // globally routable IPv6
+    }
+    // IPv4 private/reserved ranges.
     if (address.bytes.size() < 4) return true;
-    const auto a = address.bytes[0], b = address.bytes[1], c = address.bytes[2], d = address.bytes[3];
+    const auto a = address.bytes[0], b = address.bytes[1], c = address.bytes[2];
     if (a == 10) return false;
     if (a == 127) return false;
     if (a == 169 && b == 254) return false;
     if (a == 172 && b >= 16 && b <= 31) return false;
     if (a == 192 && b == 168) return false;
-    // Documentation / test ranges (TEST-NET-1/2/3, benchmarking 198.18-19):
     if (a == 192 && b == 0 && c == 2) return false;
     if (a == 198 && b == 51 && c == 100) return false;
     if (a == 203 && b == 0 && c == 113) return false;
@@ -140,6 +170,12 @@ public:
     void observe(const packet::Packet& packet, const flow::Flow& flow, std::vector<BehavioralEvent>& events) override {
         if (!is_host_discovery_probe(packet)) return;
         if (is_globally_routable(packet.destination)) return;
+        // For ICMPv6, also skip multicast destinations (ff00::/8) — these are
+        // normal Neighbor Discovery / Router Discovery multicasts, not sweeps.
+        if (packet.transport == packet::TransportProtocol::icmpv6 &&
+            packet.destination.family == packet::AddressFamily::ipv6 &&
+            !packet.destination.bytes.empty() &&
+            packet.destination.bytes[0] == 0xff) return;
         const auto source = ip_string(packet.source);
         const auto protocol = protocol_string(packet.transport);
         const auto key = source + "|" + protocol;

@@ -106,16 +106,49 @@ int main(int argc, char** argv) {
     }
 
     if (argc > 2 && std::string(argv[1]) == "--interface") {
+        // Check for optional --capture-mode argument.
+        std::string capture_mode = "normal";
+        for (int i = 3; i < argc - 1; ++i) {
+            if (std::string(argv[i]) == "--capture-mode") {
+                capture_mode = argv[i + 1];
+            }
+        }
         delta_nids::telemetry::MetricsRegistry::global().increment("explicit_capture_selections");
         const auto result = manager.select_explicit(argv[2]);
         if (!result.selected) {
             std::cerr << "[ERROR] " << result.error << '\n';
             return 2;
         }
-        std::cout << "[INFO] Capture mode: EXPLICIT\n"
+        const bool span = (capture_mode == "span");
+        std::cout << "[INFO] Capture mode: " << (span ? "SPAN" : "EXPLICIT") << '\n'
                   << "[INFO] Selected interface: " << result.interface.info.name << '\n'
                   << "[INFO] Capture backend: "
                   << backend_name(result.interface.info.capture_backend) << '\n';
+        if (span) {
+            std::cout
+                << "\n"
+                << "╔══════════════════════════════════════════════════════════════╗\n"
+                << "║        DELTA-NIDS  —  SPAN / PORT MIRROR MODE ACTIVE         ║\n"
+                << "╚══════════════════════════════════════════════════════════════╝\n"
+                << "\n"
+                << "  Interface  : " << result.interface.info.name << "\n"
+                << "  Promiscuous: YES\n"
+                << "  BPF filter : NONE (all EtherTypes pass, including IPv6)\n"
+                << "\n"
+                << "  Expected topology:\n"
+                << "   [Source ports] ──── Switch SPAN session ────> [Mirror port]\n"
+                << "                                                      |\n"
+                << "                                              [This interface]\n"
+                << "\n"
+                << "  If no traffic arrives within 10 seconds, verify:\n"
+                << "    1. Switch SPAN source ports are configured.\n"
+                << "    2. Mirror destination port matches this interface's cable.\n"
+                << "    3. VLAN trunking is enabled on the mirror destination port.\n"
+                << "    4. Source ports are carrying active traffic.\n"
+                << "\n"
+                << "  Delta-NIDS is PASSIVE: it never transmits, routes, or blocks.\n"
+                << "\n";
+        }
         return 0;
     }
 

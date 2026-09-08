@@ -136,16 +136,25 @@ class TrafficLog(Base):
 
 _MIGRATIONS = (
     # (table, column, ALTER definition) applied to databases created before the column existed.
-    ("alerts", "traffic_id", "INTEGER NOT NULL DEFAULT 0"),
-    ("traffic_logs", "details", "TEXT"),
-    ("rules", "gid", "INTEGER NOT NULL DEFAULT 1"),
-    ("rules", "priority", "INTEGER NOT NULL DEFAULT 3"),
-    ("rules", "protocol", "VARCHAR(20)"),
-    ("rules", "category", "VARCHAR(100)"),
-    ("rules", "rule_text", "TEXT"),
-    ("rules", "rule_json", "TEXT"),
-    ("rules", "updated_at", "INTEGER"),
-    ("statistics", "text_value", "TEXT"),
+    ("alerts", "traffic_id",             "INTEGER NOT NULL DEFAULT 0"),
+    ("alerts", "ip_version",             "INTEGER NOT NULL DEFAULT 0"),
+    ("alerts", "capture_mode",           "TEXT"),
+    ("alerts", "capture_interface",      "TEXT"),
+    ("alerts", "vlan_id",               "INTEGER NOT NULL DEFAULT -1"),
+    ("alerts", "source_mac",             "TEXT"),
+    ("alerts", "destination_mac",        "TEXT"),
+    ("traffic_logs", "details",          "TEXT"),
+    ("traffic_logs", "ip_version",       "INTEGER NOT NULL DEFAULT 0"),
+    ("traffic_logs", "capture_mode",     "TEXT"),
+    ("traffic_logs", "vlan_id",          "INTEGER NOT NULL DEFAULT -1"),
+    ("rules", "gid",                     "INTEGER NOT NULL DEFAULT 1"),
+    ("rules", "priority",               "INTEGER NOT NULL DEFAULT 3"),
+    ("rules", "protocol",               "VARCHAR(20)"),
+    ("rules", "category",               "VARCHAR(100)"),
+    ("rules", "rule_text",              "TEXT"),
+    ("rules", "rule_json",              "TEXT"),
+    ("rules", "updated_at",             "INTEGER"),
+    ("statistics", "text_value",        "TEXT"),
 )
 
 

@@ -249,6 +249,33 @@ def delete_rule(sid: int, revision: int):
         return jsonify({"error": str(error)}), 400
 
 
+@app.get("/api/capture/stats")
+def capture_stats():
+    """Return the current SPAN / capture statistics written by the Python capture heartbeat.
+
+    The stats are stored as a JSON blob in the ``statistics`` table under
+    the ``capture_runtime`` key.  This endpoint is polled by the dashboard
+    capture status panel every 2 seconds.
+    """
+    session = init_db(DB_PATH)
+    try:
+        from database.models import Statistic
+        row = session.query(Statistic).filter(Statistic.name == "capture_runtime").order_by(
+            Statistic.timestamp.desc()).first()
+        if row is None or not row.text_value:
+            return jsonify({"status": "no_data", "capture_mode": "unknown"})
+        try:
+            data = json.loads(row.text_value)
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        data["_timestamp"] = row.timestamp
+        return jsonify(data)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc), "status": "error"}), 500
+    finally:
+        session.close()
+
+
 @app.route("/api/<path:path>", methods=["GET", "DELETE"])
 def proxy_api(path):
     url = f"{API_URL}/api/{path}"

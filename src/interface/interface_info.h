@@ -11,7 +11,7 @@ enum class LinkState { unknown, up, down };
 enum class InterfaceType { unknown, ethernet, wifi, loopback, tunnel, virtual_interface };
 enum class CaptureBackend { unavailable, libpcap, npcap };
 
-enum class CaptureMode { auto_select, explicit_interface, pcap };
+enum class CaptureMode { auto_select, explicit_interface, pcap, span };
 
 struct InterfaceInfo {
     std::string stable_id;
@@ -41,6 +41,8 @@ struct ScoredInterface {
 struct SelectionResult {
     CaptureMode mode = CaptureMode::auto_select;
     bool selected = false;
+    bool span_mode = false;    // true when SPAN / port-mirror mode is active
+    bool promiscuous = false;  // true when promiscuous capture was requested
     ScoredInterface interface;
     std::vector<ScoredInterface> candidates;
     std::string error;

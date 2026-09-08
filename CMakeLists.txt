@@ -70,6 +70,8 @@ add_library(delta_nids_core STATIC
     src/interface/interface_scorer.cpp
     src/capture/packet_capture.cpp
     src/capture/pcap_capture.cpp
+    src/capture/ipv6_fragment_cache.cpp
+    src/capture/span_diagnostics.cpp
     src/packet/packet.cpp
     src/packet/decoder.cpp
     src/flow/flow.cpp
@@ -310,7 +312,28 @@ if(DELTA_NIDS_BUILD_TESTS)
     add_executable(delta-nids-api-integration-test
         tests/unit/api_integration_test.cpp
     )
-    target_link_libraries(delta-nids-api-integration-test PRIVATE delta_nids_core nlohmann_json::nlohmann_json)
+    target_link_libraries(delta-nids-api-integration-test PRIVATE delta_nids_core nlohmann_json::nlohmann_json ${DELTA_NIDS_SQLITE_TARGET})
     target_compile_features(delta-nids-api-integration-test PRIVATE cxx_std_17)
     add_test(NAME delta-nids-api-integration-test COMMAND delta-nids-api-integration-test)
+
+    add_executable(delta-nids-span-test
+        tests/unit/span_capture_test.cpp
+    )
+    target_link_libraries(delta-nids-span-test PRIVATE delta_nids_core)
+    target_compile_features(delta-nids-span-test PRIVATE cxx_std_17)
+    add_test(NAME delta-nids-span-test COMMAND delta-nids-span-test)
+
+    add_executable(delta-nids-ipv6-test
+        tests/unit/ipv6_capture_test.cpp
+    )
+    target_link_libraries(delta-nids-ipv6-test PRIVATE delta_nids_core)
+    target_compile_features(delta-nids-ipv6-test PRIVATE cxx_std_17)
+    add_test(NAME delta-nids-ipv6-test COMMAND delta-nids-ipv6-test)
+
+    add_executable(delta-nids-vlan-test
+        tests/unit/vlan_test.cpp
+    )
+    target_link_libraries(delta-nids-vlan-test PRIVATE delta_nids_core)
+    target_compile_features(delta-nids-vlan-test PRIVATE cxx_std_17)
+    add_test(NAME delta-nids-vlan-test COMMAND delta-nids-vlan-test)
 endif()

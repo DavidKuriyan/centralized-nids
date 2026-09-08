@@ -5,22 +5,28 @@ Delta-NIDS is a passive, cross-platform Network Intrusion Detection System. It o
 ## Evidence flow
 
 ```text
-Npcap/libpcap or PCAP replay
+Npcap/libpcap (Host or Switch SPAN Mirror) or PCAP replay
         ↓
-packet capture and normalization
+packet capture (Promiscuous, 802.1Q/QinQ VLAN stripping, deduplication)
         ↓
-Ethernet/IP/TCP/UDP/ICMP decoding
+dual-stack IPv4 / IPv6 / TCP / UDP / ICMP / ICMPv6 decoding
         ↓
-flow and bounded behavioral state
+flow reassembly and bounded behavioral state
         ↓
 rule and scan detection
         ↓
-alerts with packet-derived evidence
+alerts with packet-derived evidence and endpoints
         ↓
-SQLite traffic/alert/incident persistence
+SQLite traffic/alert/incident persistence with capture metadata
         ↓
-native API → Flask proxy → dashboard
+native API → Flask proxy → dashboard (with live SPAN status panel)
 ```
+
+## Capture Modes & SPAN Pipeline
+
+Delta-NIDS supports two capture operational modes:
+- **`normal` mode**: Captures from a standard endpoint interface using Npcap/libpcap and host socket layers.
+- **`span` mode**: Configured specifically for passive tap or switch mirror destination interfaces. Promiscuous mode is strictly enforced, empty BPF filters capture all protocol families, socket receive buffers are expanded to 16+ MiB, 802.1Q/QinQ headers are extracted into packet metadata and stripped before layer 3/4 inspection, mirror duplicates are filtered via a sliding deduplication cache, and an automatic watchdog alerts operators if zero traffic is observed. See [docs/span_port_mirroring.md](span_port_mirroring.md) for switch configuration.
 
 The common detection path receives normalized packets and does not depend on Linux or Windows APIs. Platform code is limited to interface enumeration, packet acquisition, privilege handling, filesystem paths, and system metrics.
 

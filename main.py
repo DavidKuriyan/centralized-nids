@@ -57,6 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("-i", "--interface", help="live interface to monitor")
     source.add_argument("-r", "--pcap", metavar="FILE", help="read packets from a PCAP file")
     parser.add_argument("-c", "--config", default="rules/rules.json", help="JSON rules file")
+    parser.add_argument("--capture-mode", choices=["normal", "span", "pcap"],
+                        default="normal",
+                        help="capture mode: normal (default), span (SPAN/port-mirror), or pcap (replay)")
+    parser.add_argument("--no-promiscuous", action="store_true",
+                        help="disable promiscuous mode (not recommended for SPAN)")
+    parser.add_argument("--snap-length", type=int, default=65535,
+                        help="libpcap/Npcap snap length in bytes (default: 65535)")
+    parser.add_argument("--buffer-size", type=int, default=0,
+                        help="capture socket buffer size in bytes (0 = use default 16 MiB)")
     parser.add_argument("--filter", default="", help="libpcap/BPF filter for live capture (default: empty = all protocols)")
     parser.add_argument("-n", "--count", type=int, default=0, help="stop after N live packets; 0 means unlimited")
     parser.add_argument("--db", help="optional SQLite database path")
@@ -114,8 +123,35 @@ def main(argv=None) -> int:
             connection_idle_timeout=_env_float("DELTA_NIDS_CONNECTION_IDLE_TIMEOUT", 120.0),
             correlation_window=_env_float("DELTA_NIDS_CORRELATION_WINDOW", 600.0),
         )
+        capture_mode = args.capture_mode if hasattr(args, "capture_mode") else "normal"
+        if args.pcap:
+            capture_mode = "pcap"
+        promiscuous = not getattr(args, "no_promiscuous", False)
+        snap_length = getattr(args, "snap_length", 65535)
+        buffer_size = getattr(args, "buffer_size", 0)
+
+        # Print SPAN mode startup banner.
+        if capture_mode == "span" and args.interface:
+            print(
+                "\n"
+                "╔══════════════════════════════════════════════════════════════╗\n"
+                "║        DELTA-NIDS  —  SPAN / PORT MIRROR MODE ACTIVE         ║\n"
+                "╚══════════════════════════════════════════════════════════════╝\n"
+                f"\n  Interface  : {args.interface}\n"
+                "  Promiscuous: " + ("YES" if promiscuous else "NO") + "\n"
+                "  BPF filter : " + (args.filter or "NONE (all EtherTypes including IPv6)") + "\n"
+                "\n  Expected topology:\n"
+                "   [Source ports] ──── Switch SPAN session ────> [Mirror port]\n"
+                "                                                     |\n"
+                f"                                             [{args.interface}]\n"
+                "\n  Delta-NIDS is PASSIVE: it never transmits, routes, or blocks.\n",
+                flush=True
+            )
+
         capture = PacketCapture(core.process_packet, interface=args.interface, pcap_path=args.pcap,
-                                bpf_filter=args.filter, count=args.count)
+                                bpf_filter=args.filter, count=args.count,
+                                capture_mode=capture_mode, promiscuous=promiscuous,
+                                snap_length=snap_length, buffer_size=buffer_size)
     except (FileNotFoundError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         if isinstance(exc, PermissionError):
@@ -131,9 +167,25 @@ def main(argv=None) -> int:
             last_packet = capture.last_packet_time
             age = time.time() - last_packet if last_packet is not None else None
             activity = "ACTIVE" if age is not None and age <= 10 else "IDLE"
-            manager.persist_runtime_status(activity, source_name, capture.packets_seen,
-                                           core.packets_sniffed, last_packet,
-                                           packets_failed=capture.packets_failed)
+            stats = capture.capture_statistics() if hasattr(capture, "capture_statistics") else {}
+            manager.persist_runtime_status(
+                activity, source_name, capture.packets_seen,
+                core.packets_sniffed, last_packet,
+                packets_failed=capture.packets_failed,
+                capture_mode=stats.get("capture_mode", "normal"),
+                capture_interface=stats.get("capture_interface", ""),
+                bytes_captured=stats.get("bytes_captured", 0),
+                duplicate_packets=stats.get("duplicate_packets", 0),
+                malformed_packets=stats.get("malformed_packets", 0),
+                ipv4_packets=stats.get("ipv4_packets", 0),
+                ipv6_packets=stats.get("ipv6_packets", 0),
+                vlan_packets=stats.get("vlan_packets", 0),
+                tcp_packets=stats.get("tcp_packets", 0),
+                udp_packets=stats.get("udp_packets", 0),
+                icmp_packets=stats.get("icmp_packets", 0),
+                icmpv6_packets=stats.get("icmpv6_packets", 0),
+                zero_traffic_warning=stats.get("zero_traffic_warning", False),
+            )
 
     heartbeat_thread = threading.Thread(target=heartbeat, name="delta-nids-heartbeat", daemon=True)
     heartbeat_thread.start()

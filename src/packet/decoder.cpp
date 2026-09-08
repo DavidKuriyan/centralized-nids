@@ -154,6 +154,8 @@ DecodeResult decode_ipv6(Packet packet, const Reader& reader, std::size_t offset
             packet.ip.fragment_offset = static_cast<std::uint32_t>((fragment >> 3) & 0x1fffU) * 8U;
             packet.ip.more_fragments = (fragment & 1U) != 0;
             packet.ip.fragmented = true;
+            // Store the 32-bit Fragment Identification for deduplication.
+            packet.ip.fragment_id = reader.u32(transport_offset + 4);
             next_header = reader.u8(transport_offset);
             transport_offset += 8;
         } else {
@@ -201,7 +203,10 @@ DecodeResult decode(const capture::CapturedPacket& captured, std::string interfa
     std::size_t offset = 14;
     for (std::size_t tags = 0; tags < 8 && is_vlan(ether_type); ++tags) {
         if (!reader.available(offset, 4)) return failure(std::move(packet), DecodeStatus::truncated, "truncated VLAN header");
-        packet.vlan.identifiers.push_back(static_cast<std::uint16_t>(reader.u16(offset) & 0x0fffU));
+        const auto tci = reader.u16(offset);
+        packet.vlan.identifiers.push_back(static_cast<std::uint16_t>(tci & 0x0fffU));
+        // 3-bit PCP in the upper bits of TCI.
+        packet.vlan.priorities.push_back(static_cast<std::uint8_t>((tci >> 13) & 0x07U));
         ether_type = reader.u16(offset + 2);
         offset += 4;
     }

@@ -36,6 +36,20 @@ struct Alert {
     std::string evidence;
     std::string explanation;
     std::string fingerprint;
+
+    // SPAN / capture context -----------------------------------------------
+    // IP version of the triggering packet (4 or 6; 0 = unknown).
+    int ip_version = 0;
+    // Capture mode at the time of detection ("normal", "span", "pcap").
+    std::string capture_mode;
+    // Interface name on which the packet was captured.
+    std::string capture_interface;
+    // Outermost VLAN ID of the triggering packet (-1 = untagged / not applicable).
+    int vlan_id = -1;
+    // Ethernet MAC addresses (colon-separated hex, e.g. "aa:bb:cc:dd:ee:ff").
+    // Empty when not available (e.g. PCAP replay without Ethernet headers).
+    std::string source_mac;
+    std::string destination_mac;
 };
 
 struct AlertConfig {

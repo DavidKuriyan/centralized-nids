@@ -14,7 +14,7 @@ if os.name == "nt":
     if os.path.exists(npcap_dir) and npcap_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = npcap_dir + os.pathsep + os.environ.get("PATH", "")
 
-from scapy.all import ARP, Ether, IP, ICMP, IPv6, IPv6ExtHdrHopByHop, IPv6ExtHdrDestOpt, IPv6ExtHdrRouting, IPv6ExtHdrFragment, ICMPv6EchoRequest, ICMPv6DestUnreach, TCP, UDP, conf, get_if_addr, get_if_list, rdpcap, sniff
+from scapy.all import ARP, Dot1Q, Ether, IP, ICMP, IPv6, IPv6ExtHdrHopByHop, IPv6ExtHdrDestOpt, IPv6ExtHdrRouting, IPv6ExtHdrFragment, ICMPv6EchoRequest, ICMPv6DestUnreach, TCP, UDP, conf, get_if_addr, get_if_list, rdpcap, sniff
 
 logger = logging.getLogger("delta-ids.capture")
 
@@ -98,6 +98,10 @@ def _decoded_details(packet, info: dict) -> dict:
         details["src_mac"] = packet[Ether].src
         details["dst_mac"] = packet[Ether].dst
         details["ethertype"] = hex(int(packet[Ether].type))
+    if Dot1Q in packet:
+        dot1q = packet[Dot1Q]
+        details["vlan_id"] = _safe_int(getattr(dot1q, "vlan", None))
+        details["vlan_prio"] = _safe_int(getattr(dot1q, "prio", None))
     if IPv6 in packet:
         ip_layer = packet[IPv6]
         details.update({
@@ -154,13 +158,96 @@ def _decoded_details(packet, info: dict) -> dict:
 
 
 def packet_to_info(packet) -> Optional[dict]:
-    """Normalise IPv4 packets into the shared Delta-NIDS packet contract.
+    """Normalise IPv4 and IPv6 packets into the shared Delta-NIDS packet contract.
 
-    IPv6 is intentionally ignored so capture, detection, storage, and the
-    dashboard remain IPv4-only.
+    Previously this function returned None for all IPv6 packets.  That
+    restriction has been removed — IPv6 is now a fully supported capture
+    path and every downstream consumer (detection engine, flow engine,
+    alert manager, storage) handles both address families.
     """
+    # ----- IPv6 path --------------------------------------------------
     if IPv6 in packet:
-        return None
+        ip6 = packet[IPv6]
+        info = {
+            "src_ip": ip6.src,
+            "dst_ip": ip6.dst,
+            "protocol": "IP",
+            "src_port": None,
+            "dst_port": None,
+            "length": len(packet),
+            "payload": b"",
+            "icmp_type": None,
+            "icmp_code": None,
+            "icmp_inner_src_ip": None,
+            "icmp_inner_dst_ip": None,
+            "icmp_inner_src_port": None,
+            "icmp_inner_dst_port": None,
+            "icmp_inner_protocol": None,
+            "tcp_flags": None,
+            "tcp_sequence": None,
+            "tcp_acknowledgment": None,
+            "icmp_id": None,
+            "icmp_sequence": None,
+            "ip_version": 6,
+        }
+        # Walk extension headers to find the transport layer.
+        # Scapy stacks them as: IPv6 / HopByHop / ... / TCP
+        # Direct layer lookup sometimes works but walking is safer.
+        transport = ip6.payload
+        for _ in range(16):
+            if isinstance(transport, (TCP, UDP, ICMPv6EchoRequest, ICMPv6DestUnreach)):
+                break
+            # Also check raw Scapy ICMPv6 base class
+            from scapy.layers.inet6 import ICMPv6Unknown, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6ND_RS, ICMPv6ND_RA
+            if isinstance(transport, (ICMPv6Unknown, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6ND_RS, ICMPv6ND_RA)):
+                break
+            next_layer = getattr(transport, "payload", None)
+            if next_layer is None or next_layer is transport:
+                break
+            transport = next_layer
+
+        if isinstance(transport, TCP):
+            info.update(protocol="TCP", src_port=int(transport.sport), dst_port=int(transport.dport),
+                        tcp_flags=str(transport.flags), tcp_sequence=_safe_int(transport.seq),
+                        tcp_acknowledgment=_safe_int(transport.ack),
+                        payload=bytes(transport.payload))
+        elif isinstance(transport, UDP):
+            info.update(protocol="UDP", src_port=int(transport.sport), dst_port=int(transport.dport),
+                        payload=bytes(transport.payload))
+        elif isinstance(transport, ICMPv6EchoRequest):
+            info.update(protocol="ICMPV6", icmp_type=128, icmp_code=0,
+                        icmp_id=_safe_int(getattr(transport, "id", None)),
+                        icmp_sequence=_safe_int(getattr(transport, "seq", None)),
+                        payload=bytes(getattr(transport, "payload", b"") or b""))
+        elif isinstance(transport, ICMPv6DestUnreach):
+            info.update(protocol="ICMPV6", icmp_type=_safe_int(transport.type),
+                        icmp_code=_safe_int(transport.code),
+                        payload=bytes(getattr(transport, "payload", b"") or b""))
+        else:
+            # Generic ICMPv6 or unknown next-header.
+            try:
+                from scapy.layers.inet6 import ICMPv6Unknown
+                if isinstance(transport, ICMPv6Unknown):
+                    info.update(protocol="ICMPV6",
+                                icmp_type=_safe_int(getattr(transport, "type", None)),
+                                icmp_code=_safe_int(getattr(transport, "code", None)))
+                else:
+                    # Neighbor Discovery (133-137) and other ICMPv6 types.
+                    t = _safe_int(getattr(transport, "type", None))
+                    if t is not None:
+                        info.update(protocol="ICMPV6", icmp_type=t,
+                                    icmp_code=_safe_int(getattr(transport, "code", None)))
+            except Exception:
+                pass
+
+        info["details"] = _decoded_details(packet, info)
+        if Dot1Q in packet:
+            info["vlan_id"] = _safe_int(getattr(packet[Dot1Q], "vlan", None))
+        info["source"] = _format_endpoint(info["src_ip"], info.get("src_port"))
+        info["destination"] = _format_endpoint(info["dst_ip"], info.get("dst_port"))
+        return info
+
+    # ----- ARP path ---------------------------------------------------
     if ARP in packet and IP not in packet:
         arp = packet[ARP]
         return {
@@ -181,20 +268,7 @@ def packet_to_info(packet) -> Optional[dict]:
     if IP not in packet:
         return None
 
-    # Scapy's IPv6 extension layers can leave the transport protocol hidden
-    # from direct layer lookup. Walk the payload chain so TCP/UDP/ICMPv6 remain
-    # visible after Hop-by-Hop, Destination, Routing, or Fragment headers.
-    transport_layer = None
-    if IPv6 in packet and not any(layer_type in packet for layer_type in (TCP, UDP, ICMPv6EchoRequest)):
-        transport_layer = packet[IPv6].payload
-        for _ in range(16):
-            if isinstance(transport_layer, (TCP, UDP, ICMPv6EchoRequest)):
-                break
-            next_layer = getattr(transport_layer, "payload", None)
-            if next_layer is None or next_layer is transport_layer:
-                transport_layer = None
-                break
-            transport_layer = next_layer
+    # ----- IPv4 path --------------------------------------------------
 
     ip_layer = packet[IP]
     info = {
@@ -217,11 +291,12 @@ def packet_to_info(packet) -> Optional[dict]:
         "tcp_acknowledgment": None,
         "icmp_id": None,
         "icmp_sequence": None,
+        "ip_version": 4,
     }
-    icmpv6_error_layer = packet[ICMPv6DestUnreach] if ICMPv6DestUnreach in packet else (transport_layer if isinstance(transport_layer, ICMPv6DestUnreach) else None)
-    tcp_layer = packet[TCP] if TCP in packet and icmpv6_error_layer is None else (transport_layer if isinstance(transport_layer, TCP) else None)
-    udp_layer = packet[UDP] if UDP in packet and icmpv6_error_layer is None else (transport_layer if isinstance(transport_layer, UDP) else None)
-    icmpv6_layer = packet[ICMPv6EchoRequest] if ICMPv6EchoRequest in packet and icmpv6_error_layer is None else (transport_layer if isinstance(transport_layer, ICMPv6EchoRequest) else None)
+    icmpv6_error_layer = packet[ICMPv6DestUnreach] if ICMPv6DestUnreach in packet else None
+    tcp_layer = packet[TCP] if TCP in packet and icmpv6_error_layer is None else None
+    udp_layer = packet[UDP] if UDP in packet and icmpv6_error_layer is None else None
+    icmpv6_layer = packet[ICMPv6EchoRequest] if ICMPv6EchoRequest in packet and icmpv6_error_layer is None else None
     if tcp_layer is not None:
         info.update(protocol="TCP", src_port=int(tcp_layer.sport), dst_port=int(tcp_layer.dport),
                     tcp_flags=str(tcp_layer.flags), tcp_sequence=_safe_int(tcp_layer.seq),
@@ -253,6 +328,8 @@ def packet_to_info(packet) -> Optional[dict]:
     decoded = _decoded_details(packet, info)
     info["details"] = {key: value for key, value in decoded.items()
                        if key not in {"src_mac", "dst_mac"}}
+    if Dot1Q in packet:
+        info["vlan_id"] = _safe_int(getattr(packet[Dot1Q], "vlan", None))
     info["source"] = _format_endpoint(info["src_ip"], info["src_port"])
     info["destination"] = _format_endpoint(info["dst_ip"], info["dst_port"])
     return info
@@ -434,7 +511,9 @@ class PacketCapture:
 
     def __init__(self, on_packet: Callable[[dict], None], interface: Optional[str] = None,
                  pcap_path: Optional[str] = None, bpf_filter: Optional[str] = None,
-                 count: int = 0):
+                 count: int = 0, capture_mode: str = "normal",
+                 promiscuous: bool = True, snap_length: int = 65535,
+                 buffer_size: int = 0):
         if not interface and not pcap_path:
             raise ValueError("one of interface or pcap_path is required")
         self.on_packet = on_packet
@@ -442,6 +521,10 @@ class PacketCapture:
         self.pcap_path = pcap_path
         self.bpf_filter = bpf_filter
         self.count = count
+        self.capture_mode = capture_mode  # "normal", "span", or "pcap"
+        self.promiscuous = promiscuous
+        self.snap_length = snap_length
+        self.buffer_size = buffer_size
         self._stopped = False
         self.packets_seen = 0
         self.packets_failed = 0
@@ -449,27 +532,60 @@ class PacketCapture:
         self.state = "STARTING"
         self._raw_cap: Optional[_WindowsRawCapture] = None
         self._seen_lock = threading.Lock()
+        # Deduplication window: SPAN mode uses a wider window (2 s) to absorb
+        # mirror-induced latency; normal mode keeps the default 1 s.
+        self._duplicate_window_seconds = 2.0 if capture_mode == "span" else 1.0
         # Keys are retained only briefly so overlapping capture backends do not
         # double-dispatch a frame, while a later real scan with identical probe
         # fields is still observable.
         self._seen_packets: dict[tuple, float] = {}
-        self._duplicate_window_seconds = 1.0
+        # Extended capture statistics.
+        self.bytes_captured: int = 0
+        self.duplicate_count: int = 0
+        self.malformed_count: int = 0
+        self.ipv4_count: int = 0
+        self.ipv6_count: int = 0
+        self.vlan_count: int = 0
+        self.tcp_count: int = 0
+        self.udp_count: int = 0
+        self.icmp_count: int = 0
+        self.icmpv6_count: int = 0
+        self._capture_start_time: Optional[float] = None
+        self._zero_traffic_warned: bool = False
 
     def _is_duplicate(self, info: dict) -> bool:
         details = info.get("details") or {}
-        key = (
-            info.get("src_ip"),
-            info.get("dst_ip"),
-            info.get("protocol"),
-            info.get("src_port"),
-            info.get("dst_port"),
-            details.get("ip_id"),
-            info.get("tcp_flags"),
-            info.get("tcp_sequence"),
-            info.get("icmp_sequence"),
-            hashlib.sha256(info.get("payload") or b"").digest(),
-            len(info.get("payload") or b"")
-        )
+        ip_version = info.get("ip_version", 4)
+        # IPv6: prefer Fragment ID (unique per datagram) when available;
+        # fall back to payload hash for unfragmented packets.
+        if ip_version == 6:
+            key = (
+                info.get("src_ip"),
+                info.get("dst_ip"),
+                info.get("protocol"),
+                info.get("src_port"),
+                info.get("dst_port"),
+                details.get("ip_fragment_id"),   # None for unfragmented
+                info.get("tcp_flags"),
+                info.get("tcp_sequence"),
+                info.get("icmp_sequence"),
+                hashlib.sha256(info.get("payload") or b"").digest(),
+                len(info.get("payload") or b"")
+            )
+        else:
+            key = (
+                info.get("src_ip"),
+                info.get("dst_ip"),
+                info.get("protocol"),
+                info.get("src_port"),
+                info.get("dst_port"),
+                details.get("ip_id"),
+                info.get("tcp_flags"),
+                info.get("tcp_sequence"),
+                info.get("icmp_sequence"),
+                hashlib.sha256(info.get("payload") or b"").digest(),
+                len(info.get("payload") or b"")
+            )
         now = time.monotonic()
         with self._seen_lock:
             cutoff = now - self._duplicate_window_seconds
@@ -478,6 +594,7 @@ class PacketCapture:
                 if seen_at >= cutoff
             }
             if key in self._seen_packets:
+                self.duplicate_count += 1
                 return True
             self._seen_packets[key] = now
             if len(self._seen_packets) > 10000:
@@ -498,13 +615,31 @@ class PacketCapture:
                     # deduplication behave exactly as they did during the live
                     # capture. Wall-clock time is never used for replay state.
                     info["_monotonic"] = float(monotonic)
+                # Annotate every packet with capture context.
+                info["capture_mode"] = self.capture_mode
+                info["capture_interface"] = self.interface or ""
                 if self._is_duplicate(info):
                     return
                 self.packets_seen += 1
                 self.last_packet_time = time.time()
+                # Update protocol counters.
+                proto = (info.get("protocol") or "").upper()
+                ip_version = info.get("ip_version", 4)
+                if ip_version == 6:
+                    self.ipv6_count += 1
+                elif proto not in ("ARP",):
+                    self.ipv4_count += 1
+                if proto == "TCP":    self.tcp_count    += 1
+                elif proto == "UDP":  self.udp_count    += 1
+                elif proto == "ICMP": self.icmp_count   += 1
+                elif proto == "ICMPV6": self.icmpv6_count += 1
+                # VLAN info (populated by _decoded_details from Scapy Dot1Q layer)
+                if info.get("details", {}).get("vlan_id") is not None:
+                    self.vlan_count += 1
                 self.on_packet(info)
         except Exception:
             self.packets_failed += 1
+            self.malformed_count += 1
             self.state = "DEGRADED"
             logger.exception("packet processing failed; capture loop continues")
 
@@ -557,6 +692,7 @@ class PacketCapture:
     def run(self) -> None:
         self._stopped = False
         self.state = "RUNNING"
+        self._capture_start_time = time.monotonic()
         # ---- PCAP replay path ------------------------------------------------
         if self.pcap_path:
             try:
@@ -582,27 +718,68 @@ class PacketCapture:
             iface_arg = self.interface
             if os.name == "nt" and isinstance(self.interface, str):
                 iface_arg = self._resolve_iface_windows(self.interface)
-                # Start the supplementary Windows ICMP capture thread.
-                # It binds to the interface's local IP to target the right adapter.
-                local_ip = getattr(iface_arg, "ip", None) if iface_arg is not self.interface else None
-                if local_ip and local_ip not in ("0.0.0.0", ""):
-                    self._raw_cap = _WindowsRawCapture(local_ip, self._dispatch_raw)
-                    self._raw_cap.start()
+                # Start the supplementary Windows ICMP capture thread only in
+                # normal mode.  In SPAN mode, all traffic arrives via Npcap on
+                # the mirror interface; the raw socket is not needed and would
+                # only produce duplicates.
+                if self.capture_mode != "span":
+                    local_ip = getattr(iface_arg, "ip", None) if iface_arg is not self.interface else None
+                    if local_ip and local_ip not in ("0.0.0.0", ""):
+                        self._raw_cap = _WindowsRawCapture(local_ip, self._dispatch_raw)
+                        self._raw_cap.start()
 
             # Use no BPF filter when bpf_filter is empty so ALL protocols are
-            # captured (ICMP, TCP, UDP, ARP, etc.) and packet_to_info silently
-            # discards non-IPv4 frames. A non-empty filter is honoured as-is.
+            # captured (ICMP, TCP, UDP, ARP, IPv6, ICMPv6, etc.).
+            # In SPAN mode, an empty filter is the correct default: the mirror
+            # port delivers every frame from the source ports unchanged.
             filter_arg = self.bpf_filter if self.bpf_filter else None
+
+            # In SPAN mode, explicitly enable promiscuous capture.
+            if self.capture_mode == "span":
+                conf.promisc = 1
+
             previous_bufsize = conf.bufsize
             # Scanner-class bursts (masscan/nmap at 10k+ pps) can overflow the
             # default 64 KiB receive buffer and silently drop the packets the
             # detector needs. Enlarge the socket buffer for the capture.
-            conf.bufsize = max(conf.bufsize, 16 * 1024 * 1024)
+            requested_bufsize = self.buffer_size if self.buffer_size > 0 else 16 * 1024 * 1024
+            conf.bufsize = max(conf.bufsize, requested_bufsize)
+
+            # Zero-traffic SPAN diagnostic: if we are in SPAN mode and no packet
+            # arrives within 10 seconds, log an actionable diagnostic.
+            zero_traffic_timer: Optional[threading.Timer] = None
+            if self.capture_mode == "span":
+                def _zero_traffic_warn():
+                    if not self._stopped and self.packets_seen == 0 and not self._zero_traffic_warned:
+                        self._zero_traffic_warned = True
+                        elapsed = time.monotonic() - (self._capture_start_time or time.monotonic())
+                        msg = (
+                            f"\nNo traffic detected on SPAN interface '{self.interface}' "
+                            f"after {elapsed:.0f}s.\n"
+                            "Check:\n"
+                            "  1. Switch SPAN session is configured (source ports selected,\n"
+                            "     destination port set to the port this NIDS is plugged into).\n"
+                            "  2. An Ethernet cable connects the switch mirror port to this interface.\n"
+                            "  3. VLAN trunking is enabled on the mirror destination port.\n"
+                            "  4. Source ports are carrying active traffic (ping/browse to verify).\n"
+                            "  5. You are running as root (Linux) or Administrator (Windows).\n"
+                            "Delta-NIDS remains passive and will process frames as soon as they arrive.\n"
+                        )
+                        logger.warning(msg)
+                        print(msg, flush=True)
+                zero_traffic_timer = threading.Timer(10.0, _zero_traffic_warn)
+                zero_traffic_timer.daemon = True
+                zero_traffic_timer.start()
+
             try:
                 sniff(iface=iface_arg, filter=filter_arg, prn=self._dispatch,
                       store=False, count=self.count, stop_filter=lambda _: self._stopped)
             finally:
+                if zero_traffic_timer:
+                    zero_traffic_timer.cancel()
                 conf.bufsize = previous_bufsize
+                if self.capture_mode == "span":
+                    conf.promisc = 0
         except Exception:
             self.state = "ERROR"
             logger.exception("capture backend stopped unexpectedly")
@@ -620,3 +797,26 @@ class PacketCapture:
             self._raw_cap.stop()
         if self.state != "ERROR":
             self.state = "STOPPED"
+
+    def capture_statistics(self) -> dict:
+        """Return a snapshot of extended capture statistics for API/dashboard."""
+        elapsed = time.monotonic() - (self._capture_start_time or time.monotonic())
+        return {
+            "capture_mode": self.capture_mode,
+            "capture_interface": self.interface or "",
+            "state": self.state,
+            "packets_seen": self.packets_seen,
+            "packets_failed": self.packets_failed,
+            "bytes_captured": self.bytes_captured,
+            "duplicate_packets": self.duplicate_count,
+            "malformed_packets": self.malformed_count,
+            "ipv4_packets": self.ipv4_count,
+            "ipv6_packets": self.ipv6_count,
+            "vlan_packets": self.vlan_count,
+            "tcp_packets": self.tcp_count,
+            "udp_packets": self.udp_count,
+            "icmp_packets": self.icmp_count,
+            "icmpv6_packets": self.icmpv6_count,
+            "elapsed_seconds": elapsed,
+            "zero_traffic_warning": self._zero_traffic_warned,
+        }

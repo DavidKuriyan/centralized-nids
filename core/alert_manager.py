@@ -19,14 +19,22 @@ logger = logging.getLogger("delta-ids")
 
 
 def format_endpoint(ip: object, port: object = None) -> str:
-    """Render an IPv4 endpoint; IPv6 is intentionally not exposed."""
+    """Render an IP endpoint for terminal and alert display.
+
+    IPv4 endpoints are formatted as ``addr:port`` (or just ``addr``).
+    IPv6 endpoints are formatted as ``[addr]:port`` (RFC 5952 bracket
+    notation) so the colon separator is unambiguous.
+    """
     if ip is None or ip == "":
         return "-"
     value = str(ip)
-    if ":" in value:
+    if not value:
         return "-"
+    is_ipv6 = ":" in value
     if port is None or port == "":
-        return value
+        return f"[{value}]" if is_ipv6 else value
+    if is_ipv6:
+        return f"[{value}]:{int(port)}"
     return f"{value}:{int(port)}"
 
 
@@ -244,10 +252,35 @@ class AlertManager:
                 self.session.rollback()
                 logger.error("failed to persist incident: %s", error)
 
-    def persist_runtime_status(self, status: str, interface: str | None = None, packets_captured: int = 0, packets_processed: int = 0, last_packet_time: float | None = None, error: str | None = None, packets_failed: int = 0) -> None:
+    def persist_runtime_status(
+            self, state: str, source: str,
+            packets_captured: int = 0, packets_processed: int = 0,
+            last_packet_time=None, packets_failed: int = 0,
+            # Extended SPAN / capture statistics
+            capture_mode: str = "normal",
+            capture_interface: str = "",
+            bytes_captured: int = 0,
+            duplicate_packets: int = 0,
+            malformed_packets: int = 0,
+            ipv4_packets: int = 0, ipv6_packets: int = 0,
+            vlan_packets: int = 0,
+            tcp_packets: int = 0, udp_packets: int = 0,
+            icmp_packets: int = 0, icmpv6_packets: int = 0,
+            zero_traffic_warning: bool = False, error: str | None = None) -> None:
         if not self.session:
             return
-        payload = json.dumps({"status": status, "interface": interface, "packets_captured": packets_captured, "packets_processed": packets_processed, "last_packet_time": last_packet_time, "error": error, "packets_failed": packets_failed})
+        payload = json.dumps({
+            "status": state, "source": source,
+            "packets_captured": packets_captured, "packets_processed": packets_processed,
+            "last_packet_time": last_packet_time, "packets_failed": packets_failed,
+            "capture_mode": capture_mode, "capture_interface": capture_interface,
+            "bytes_captured": bytes_captured, "duplicate_packets": duplicate_packets,
+            "malformed_packets": malformed_packets, "ipv4_packets": ipv4_packets,
+            "ipv6_packets": ipv6_packets, "vlan_packets": vlan_packets,
+            "tcp_packets": tcp_packets, "udp_packets": udp_packets,
+            "icmp_packets": icmp_packets, "icmpv6_packets": icmpv6_packets,
+            "zero_traffic_warning": zero_traffic_warning, "error": error
+        })
         with self._lock:
             try:
                 self.session.query(Statistic).filter(Statistic.name == "capture_runtime").delete(synchronize_session=False)

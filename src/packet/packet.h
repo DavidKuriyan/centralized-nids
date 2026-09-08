@@ -29,7 +29,10 @@ struct EthernetMetadata {
 };
 
 struct VlanMetadata {
+    // VLAN identifiers (12-bit VID, inner first for QinQ).
     std::vector<std::uint16_t> identifiers;
+    // 3-bit PCP (Priority Code Point) from the 802.1Q TCI, one per tag.
+    std::vector<std::uint8_t> priorities;
 };
 
 struct IpMetadata {
@@ -38,6 +41,9 @@ struct IpMetadata {
     std::uint8_t protocol_number = 0;
     std::uint16_t total_length = 0;
     std::uint32_t fragment_offset = 0;
+    // IPv6 Fragment Header Identification value (32-bit).  Zero for unfragmented
+    // packets and for IPv4 (use the IPv4 IP ID from the raw bytes if needed).
+    std::uint32_t fragment_id = 0;
     bool more_fragments = false;
     bool fragmented = false;
 };
@@ -59,12 +65,18 @@ struct IcmpMetadata {
     std::uint8_t code = 0;
 };
 
+// Typed alias for ICMPv6 metadata — identical in structure but semantically
+// distinct so callers can distinguish ICMP (IPv4) from ICMPv6 (IPv6).
+using Icmpv6Metadata = IcmpMetadata;
+
 struct Packet {
     std::int64_t timestamp_seconds = 0;
     std::int32_t timestamp_nanoseconds = 0;
     std::uint32_t capture_length = 0;
     std::uint32_t original_length = 0;
     std::string interface_id;
+    // Capture mode when the packet was received ("normal", "span", "pcap").
+    std::string capture_mode;
 
     EthernetMetadata ethernet;
     VlanMetadata vlan;

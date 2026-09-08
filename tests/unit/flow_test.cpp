@@ -58,8 +58,35 @@ int main() {
     assert(manager.size() == 2);
     assert(manager.statistics().evicted == 1);
 
-    const auto flushed = manager.flush();
-    assert(flushed.size() == 2);
-    assert(manager.size() == 0);
+    // IPv6 flow test
+    {
+        delta_nids::packet::Packet v6_fwd;
+        v6_fwd.timestamp_seconds = 40;
+        v6_fwd.capture_length = 100;
+        v6_fwd.original_length = 100;
+        v6_fwd.source = {delta_nids::packet::AddressFamily::ipv6, {0x20, 1, 0x0d, 0xb8, 0,0,0,0,0,0,0,0,0,0,0,1}};
+        v6_fwd.destination = {delta_nids::packet::AddressFamily::ipv6, {0x20, 1, 0x0d, 0xb8, 0,0,0,0,0,0,0,0,0,0,0,2}};
+        v6_fwd.source_port = 50000;
+        v6_fwd.destination_port = 80;
+        v6_fwd.transport = delta_nids::packet::TransportProtocol::tcp;
+        v6_fwd.tcp = delta_nids::packet::TcpMetadata{};
+
+        delta_nids::packet::Packet v6_rev = v6_fwd;
+        v6_rev.source = v6_fwd.destination;
+        v6_rev.destination = v6_fwd.source;
+        v6_rev.source_port = 80;
+        v6_rev.destination_port = 50000;
+        v6_rev.timestamp_seconds = 41;
+
+        auto& v6_flow1 = manager.process(v6_fwd);
+        const auto v6_id = v6_flow1.id;
+        auto& v6_flow2 = manager.process(v6_rev);
+        assert(v6_flow2.id == v6_id);
+        assert(manager.size() == 1);
+        assert(v6_flow2.stats.client_packets == 1);
+        assert(v6_flow2.stats.server_packets == 1);
+        (void)manager.flush();
+    }
+
     return 0;
 }

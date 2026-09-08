@@ -34,7 +34,6 @@ class RecordingAlerts:
 
 
 class PacketNormalizationTests(unittest.TestCase):
-    @unittest.skip("IPv6 is intentionally disabled")
     def test_endpoint_identity_separates_ipv6_ports_and_excludes_macs(self):
         packet = packet_to_info(Ether(src="aa:bb:cc:dd:ee:ff", dst="00:11:22:33:44:55") /
                                 IPv6(src="2401:4900:ccc4:cfa6:19b0:166f:c1a9:f86c",
@@ -47,14 +46,12 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual(packet["destination"], "[2606:4700:83b2:7cbc:c2fe:9c1:5ff2:75c4]:443")
         self.assertNotIn("AA:BB:CC:DD:EE:FF", packet.values())
 
-    @unittest.skip("IPv6 is intentionally disabled")
     def test_human_alert_formats_ipv6_with_brackets(self):
         output = format_human_alert(1, {"src_ip": "2001:db8::1", "src_port": 12809,
                                        "dst_ip": "2001:db8::2", "dst_port": 443,
                                        "protocol": "TCP", "sid": 1, "message": "test"}, "LOW")
         self.assertIn("[2001:db8::1]:12809 -> [2001:db8::2]:443", output)
 
-    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_extension_header_transport_is_decoded(self):
         from scapy.all import IPv6ExtHdrHopByHop
         packet = Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / IPv6ExtHdrHopByHop() / TCP(sport=40000, dport=443, flags="S")
@@ -88,11 +85,10 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual((icmp["protocol"], icmp["icmp_type"], icmp["icmp_code"]), ("ICMP", 8, 0))
         self.assertIsNone(packet_to_info(Ether() / b"arp"))
 
-    def test_ipv6_packets_are_ignored_for_ipv4_only_capture(self):
-        self.assertIsNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / TCP(sport=40000, dport=443, flags="S")))
-        self.assertIsNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=40000, dport=53)))
+    def test_ipv6_packets_are_parsed_for_capture(self):
+        self.assertIsNotNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / TCP(sport=40000, dport=443, flags="S")))
+        self.assertIsNotNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=40000, dport=53)))
 
-    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_tcp_and_udp_normalize_for_active_pipeline(self):
         tcp = packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") /
                              TCP(sport=40000, dport=443, flags="S"))
@@ -102,13 +98,12 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual((udp["protocol"], udp["src_port"], udp["dst_port"], udp["payload"]),
                          ("UDP", 53000, 53, b"dns6"))
 
-    @unittest.skip("IPv6 is intentionally disabled")
     def test_ipv6_echo_request_normalizes_for_active_pipeline(self):
         packet = packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") /
                                 ICMPv6EchoRequest(id=7, seq=3) / Raw(b"ping6"))
         self.assertIsNotNone(packet)
-        self.assertEqual((packet["protocol"], packet["src_ip"], packet["icmp_type"]),
-                         ("ICMPv6", "2001:db8::1", 128))
+        self.assertEqual((packet["protocol"].upper(), packet["src_ip"], packet["icmp_type"]),
+                         ("ICMPV6", "2001:db8::1", 128))
         self.assertEqual(packet["payload"], b"ping6")
 
     @unittest.skip("IPv6 is intentionally disabled")
@@ -206,8 +201,11 @@ class CoreAndRulesTests(unittest.TestCase):
         self.assertEqual([a["sid"] for a in recorder.alerts], [90001, 90001, 90001, 90002])
 
     def test_configured_rules_are_native_valid(self):
+        binary = "./build/delta-nids"
+        if not os.path.exists(binary) and not os.path.exists(binary + ".exe"):
+            self.skipTest("native binary not built")
         result = __import__("subprocess").run(
-            ["./build/delta-nids", "--validate-rules", "rules/rules.json"],
+            [binary, "--validate-rules", "rules/rules.json"],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

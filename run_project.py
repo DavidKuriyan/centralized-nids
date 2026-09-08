@@ -20,6 +20,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--db", type=Path, default=DEFAULT_DB, help="shared SQLite database path")
     value.add_argument("--filter", default="", help="live capture BPF filter (default: empty = capture all protocols)")
     value.add_argument("--count", type=int, default=0, help="stop live capture after N packets; 0 means unlimited")
+    value.add_argument("--capture-mode", choices=["normal", "span"], default="normal",
+                       help="capture mode: 'normal' (standard interface) or 'span' (switch mirror/SPAN port)")
     value.add_argument("--no-capture", action="store_true", help="start only the API and dashboard")
     value.add_argument("--api-port", type=int, default=8080, help="API port")
     value.add_argument("--dashboard-port", type=int, default=8081, help="dashboard port")
@@ -94,7 +96,7 @@ def command(args: argparse.Namespace) -> int:
         wait_for(f"http://127.0.0.1:{args.dashboard_port}/", dashboard)
 
         if not args.no_capture:
-            capture = [python_bin, str(ROOT / "main.py"), "--persist", "--db", str(db), "--filter", args.filter, "--count", str(args.count)]
+            capture = [python_bin, str(ROOT / "main.py"), "--persist", "--db", str(db), "--filter", args.filter, "--count", str(args.count), "--capture-mode", args.capture_mode]
             if args.pcap:
                 capture += ["--pcap", args.pcap]
             elif args.interface:
