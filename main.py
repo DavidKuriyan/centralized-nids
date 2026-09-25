@@ -91,7 +91,7 @@ def main(argv=None) -> int:
                                persist=args.persist or args.purge_false_positives)
         if args.purge_false_positives:
             removed = manager.purge_false_sweep_alerts(
-                host_threshold=_env_int("DELTA_NIDS_PING_THRESHOLD", 5),
+                host_threshold=_env_int("DELTA_NIDS_PING_THRESHOLD", 30),
             )
             print(f"purged {removed} non-justifiable host-discovery sweep alerts")
             return 0
@@ -105,7 +105,7 @@ def main(argv=None) -> int:
             manager, engine,
             scan_window=_env_float("DELTA_NIDS_SCAN_WINDOW", 30.0),
             port_threshold=_env_int("DELTA_NIDS_PORT_SCAN_THRESHOLD", 8),
-            ping_threshold=_env_int("DELTA_NIDS_PING_THRESHOLD", 5),
+            ping_threshold=_env_int("DELTA_NIDS_PING_THRESHOLD", 30),
             remote_sweep_threshold=_env_int("DELTA_NIDS_REMOTE_SWEEP_THRESHOLD", 200),
             remote_sweep_enabled=_env_bool("DELTA_NIDS_REMOTE_SWEEP_ENABLED", False),
             dns_threshold=_env_int("DELTA_NIDS_DNS_QUERY_THRESHOLD", 50),
@@ -122,6 +122,7 @@ def main(argv=None) -> int:
             reverse_shell_min_duration=_env_float("DELTA_NIDS_REVERSE_SHELL_MIN_DURATION", 30.0),
             connection_idle_timeout=_env_float("DELTA_NIDS_CONNECTION_IDLE_TIMEOUT", 120.0),
             correlation_window=_env_float("DELTA_NIDS_CORRELATION_WINDOW", 600.0),
+            enable_ipv6=_env_bool("DELTA_NIDS_ENABLE_IPV6", False),
         )
         capture_mode = args.capture_mode if hasattr(args, "capture_mode") else "normal"
         if args.pcap:

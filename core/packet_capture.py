@@ -14,7 +14,7 @@ if os.name == "nt":
     if os.path.exists(npcap_dir) and npcap_dir not in os.environ.get("PATH", ""):
         os.environ["PATH"] = npcap_dir + os.pathsep + os.environ.get("PATH", "")
 
-from scapy.all import ARP, Dot1Q, Ether, IP, ICMP, IPv6, IPv6ExtHdrHopByHop, IPv6ExtHdrDestOpt, IPv6ExtHdrRouting, IPv6ExtHdrFragment, ICMPv6EchoRequest, ICMPv6DestUnreach, TCP, UDP, conf, get_if_addr, get_if_list, rdpcap, sniff
+from scapy.all import ARP, Dot1Q, Ether, IP, ICMP, IPv6, IPv6ExtHdrHopByHop, IPv6ExtHdrDestOpt, IPv6ExtHdrRouting, IPv6ExtHdrFragment, ICMPv6EchoRequest, ICMPv6DestUnreach, TCP, UDP, Padding, conf, get_if_addr, get_if_list, rdpcap, sniff
 
 logger = logging.getLogger("delta-ids.capture")
 
@@ -89,6 +89,25 @@ def _safe_int(value) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _strip_link_padding(packet, payload: bytes) -> bytes:
+    """Remove Ethernet minimum-frame padding from a decoded payload.
+
+    Frames shorter than the 60-byte Ethernet minimum are padded by the sending
+    NIC, and Scapy keeps those trailing bytes as a ``Padding`` layer nested
+    inside the innermost layer's payload chain. Reading ``bytes(layer.payload)``
+    therefore reports the padding as application data -- a bare TCP SYN that
+    carries no payload at all is a 58-byte frame plus two NUL pad bytes, which
+    content rules such as ``content:"|00|"`` then match as real traffic.
+    """
+    if not payload:
+        return b""
+    padding = packet.getlayer(Padding)
+    pad = bytes(padding) if padding is not None else b""
+    if pad and payload.endswith(pad):
+        return payload[:-len(pad)]
+    return payload
 
 
 def _decoded_details(packet, info: dict) -> dict:
@@ -240,6 +259,7 @@ def packet_to_info(packet) -> Optional[dict]:
             except Exception:
                 pass
 
+        info["payload"] = _strip_link_padding(packet, info.get("payload") or b"")
         info["details"] = _decoded_details(packet, info)
         if Dot1Q in packet:
             info["vlan_id"] = _safe_int(getattr(packet[Dot1Q], "vlan", None))
@@ -325,6 +345,7 @@ def packet_to_info(packet) -> Optional[dict]:
     # diagnostics, but it is not part of the normal user-facing normalized
     # packet contract. Traffic persistence/API consumers therefore cannot
     # mistake a MAC address for an IP endpoint.
+    info["payload"] = _strip_link_padding(packet, info.get("payload") or b"")
     decoded = _decoded_details(packet, info)
     info["details"] = {key: value for key, value in decoded.items()
                        if key not in {"src_mac", "dst_mac"}}

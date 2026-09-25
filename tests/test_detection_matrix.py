@@ -358,6 +358,30 @@ class FtpBruteForceTests(unittest.TestCase):
         self.assertEqual(len([alert for alert in recorder.alerts if alert["sid"] == 90013]), 2)
 
 
+    def test_source_is_the_attacker_when_the_server_closes_the_connection(self):
+        # FTP servers close idle sessions, so the packet that completes the
+        # session is frequently the server's FIN - and that packet is what the
+        # detector runs on. The alert must still name the client that performed
+        # the logins as the source, never the victim.
+        core, recorder = make_core(ftp_brute_force_threshold=10, ftp_brute_force_window=60.0)
+        for index in range(10):
+            client_port = 52000 + index
+            packets = ftp_login_connection("10.117.198.204", client_port, "10.117.198.62", t=float(index))
+            # Replace the client's closing FIN with the server's.
+            packets = packets[:-1] + [tcp("10.117.198.62", 21, "10.117.198.204", client_port,
+                                          "FA", t=float(index) + 0.08)]
+            for packet in packets:
+                core.process_packet(packet)
+        alerts = [alert for alert in recorder.alerts if alert["sid"] == 90013]
+        self.assertEqual(len(alerts), 1)
+        alert = alerts[0]
+        self.assertEqual(alert["src_ip"], "10.117.198.204")
+        self.assertEqual(alert["src_port"], 52009)
+        self.assertEqual(alert["dst_ip"], "10.117.198.62")
+        self.assertEqual(alert["dst_port"], 21)
+        self.assertIn("from 10.117.198.204 to 10.117.198.62:21", alert["message"])
+
+
 class SynFloodTests(unittest.TestCase):
     """SID 90014: bare half-open SYN rate toward one service endpoint."""
 

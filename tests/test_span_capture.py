@@ -70,7 +70,7 @@ class TestSpanCapture(unittest.TestCase):
         handler = MagicMock()
         capture = PacketCapture(on_packet=handler, interface="eth0", capture_mode="span")
 
-        pkt = Ether() / IP(src="192.168.1.10", dst="192.168.1.20", id=42) / TCP(sport=12345, dport=80, seq=100) / Raw(b"test payload")
+        pkt = Ether(src="00:11:22:33:44:55", dst="66:77:88:99:aa:bb") / IP(src="192.168.1.10", dst="192.168.1.20", id=42) / TCP(sport=12345, dport=80, seq=100) / Raw(b"test payload")
 
         # First packet should be forwarded
         capture._dispatch(pkt)

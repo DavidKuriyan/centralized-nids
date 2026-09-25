@@ -251,7 +251,7 @@ def _canonical_port_set(ports: list[int]) -> Any:
     return ",".join(tokens)
 
 
-# Snort-style hex content escapes: content:"User-Agent|3a| Nmap" means the byte
+# Hex content escapes: content:"User-Agent|3a| Nmap" means the byte
 # sequence 0x3a (':') between literal text. |3a 20| is a space-separated byte
 # list. |3a| Nmap decodes to "User-Agent: Nmap".
 _HEX_TOKEN = re.compile(r"\|([0-9A-Fa-f][0-9A-Fa-f](?:[ \t]+[0-9A-Fa-f][0-9A-Fa-f])*)\|")
@@ -336,7 +336,7 @@ def _options(text: str) -> dict[str, str]:
 
 
 def parse_rule_text(rule_text: str) -> dict[str, Any]:
-    """Parse the supported passive subset of Snort-style rule syntax."""
+    """Parse the supported passive subset of signature rule syntax."""
     load_port_variables()
     text = str(rule_text or "").strip()
     match = re.match(

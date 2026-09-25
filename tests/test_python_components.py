@@ -85,6 +85,36 @@ class PacketNormalizationTests(unittest.TestCase):
         self.assertEqual((icmp["protocol"], icmp["icmp_type"], icmp["icmp_code"]), ("ICMP", 8, 0))
         self.assertIsNone(packet_to_info(Ether() / b"arp"))
 
+    def test_link_padding_is_not_reported_as_application_payload(self):
+        # A bare TCP SYN is a 58-byte frame, so the sending NIC pads it with two
+        # NUL bytes to reach the 60-byte Ethernet minimum. Scapy keeps those bytes
+        # as a Padding layer nested inside the TCP payload, which previously made
+        # content:"|00|" (SID 324, PROTOCOL-FINGER null request) match a SYN that
+        # carried no data at all.
+        frame = bytearray(bytes(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") /
+                                IP(src="10.117.198.204", dst="10.117.198.62",
+                                   ttl=51, id=49460, len=44) /
+                                TCP(sport=63428, dport=79, flags="S",
+                                    seq=3299115164, window=1024)))
+        frame[46] = 0x60  # dataoff=6 -> four TCP option bytes
+        padded = bytes(frame) + b"\x02\x04\x05\xb4" + b"\x00\x00"
+        self.assertEqual(len(padded), 60)
+        info = packet_to_info(Ether(padded))
+        self.assertEqual(info["tcp_flags"], "S")
+        self.assertEqual(info["details"]["tcp_header_length"], 24)
+        self.assertEqual(info["payload"], b"")
+        self.assertNotIn("payload_hex", info["details"])
+
+    def test_link_padding_preserves_real_payload(self):
+        frame = bytes(Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02") /
+                      IP(src="192.0.2.1", dst="198.51.100.1") /
+                      TCP(sport=40000, dport=79, flags="PA") / Raw(b"GET"))
+        padded = frame + b"\x00" * (60 - len(frame))
+        self.assertEqual(len(padded), 60)
+        info = packet_to_info(Ether(padded))
+        self.assertEqual(info["payload"], b"GET")
+        self.assertEqual(info["details"]["payload_hex"], "47 45 54")
+
     def test_ipv6_packets_are_parsed_for_capture(self):
         self.assertIsNotNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / TCP(sport=40000, dport=443, flags="S")))
         self.assertIsNotNone(packet_to_info(Ether() / IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=40000, dport=53)))
@@ -182,7 +212,7 @@ class CoreAndRulesTests(unittest.TestCase):
         recorder = RecordingAlerts()
         engine = DetectionEngine.__new__(DetectionEngine)
         engine.analyze_packet = lambda packet: []
-        core = DeltaCore(recorder, engine, ping_threshold=2)
+        core = DeltaCore(recorder, engine, ping_threshold=2, enable_ipv6=True)
         for index in range(2):
             core.process_packet({"src_ip": "2001:db8::1", "dst_ip": f"2001:db8::{index + 2}",
                                  "protocol": "ICMPv6", "icmp_type": 128, "length": 64,

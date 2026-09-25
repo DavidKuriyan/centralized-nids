@@ -80,8 +80,8 @@ def _validate_and_compile(payload):
     # ICMPv6). A protocol-only TCP/UDP/IP rule would be accepted into storage
     # but can never match because passive payload inspection needs content or
     # a regex.
-    if not rule.get("content") and not rule.get("pcre") and not rule.get("regex") and rule.get("protocol") not in {"ICMP", "ICMPV6", "ARP"}:
-        raise ValueError("rule requires content or pcre/regex; protocol-only rules are supported only for ICMP, ICMPv6, or ARP")
+    if not rule.get("content") and not rule.get("pcre") and not rule.get("regex") and rule.get("protocol") not in {"ICMP", "ARP"}:
+        raise ValueError("rule requires content or pcre/regex; protocol-only rules are supported only for ICMP or ARP")
     rule.setdefault("rule_text", payload if isinstance(payload, str) else "")
     return rule
 

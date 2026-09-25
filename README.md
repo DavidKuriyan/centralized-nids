@@ -90,7 +90,7 @@ Traffic is ingested with zero transmission footprint, normalized across IPv4 and
 | **SPAN / Port Mirroring Support** | Native mode designed for switch mirror ports with automatic zero-traffic watchdog alerts, VLAN unwrapping, and mirror deduplication. |
 | **802.1Q & QinQ VLAN Parsing** | Seamlessly strips single and nested VLAN tags, preserving tag IDs in metadata while inspecting inner IP/transport payloads. |
 | **Dual-Stack IPv4 & IPv6** | First-class IPv6 decoder with fragment cache reassembly, extension header traversal, and ICMPv6 error correlation. |
-| **Multi-Stage Detection** | Combines Snort-like signature rule evaluation (supporting canonical port variables like `$HTTP_PORTS`) with streaming behavioral detectors. |
+| **Multi-Stage Detection** | Combines passive signature rule evaluation (supporting canonical port variables like `$HTTP_PORTS`) with streaming behavioral detectors. |
 | **Robust Scan Detection** | Distinguishes SYN, FIN, NULL, Xmas, and ACK probes, streaming alerts immediately upon threshold attainment without batch delays. |
 | **Host Sweep Discrimination** | Differentiates local multi-target discovery sweeps from ordinary Internet egress and neighbor ARP resolution, eliminating false positives. |
 | **Incident Correlation** | Correlates distinct alerts sharing source, target, protocol, and classification into unified incidents with drill-down forensics. |
@@ -193,10 +193,11 @@ pip install -r requirements.txt
    git clone https://github.com/DavidKuriyan/centralized-nids.git
    cd centralized-nids
 
-   py -m venv .venv
+   # Create venv using standard Python 3.10+ (avoid experimental free-threaded 3.13t)
+   py -3.10 -m venv .venv
    .\.venv\Scripts\Activate.ps1
-   py -m pip install --upgrade pip
-   py -m pip install -r requirements.txt
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
    ```
 
 ---
@@ -212,8 +213,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDELTA_NIDS_BUILD_TESTS=ON
 # Compile the binaries
 cmake --build build --config Release
 
-# Execute test suite
-ctest --test-dir build --output-on-failure
+# Execute test suite (specify -C Release on multi-config generators like MSVC)
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 *(On Windows, run within Developer PowerShell for VS 2022 or select Ninja with `-G Ninja`.)*

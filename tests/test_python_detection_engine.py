@@ -292,6 +292,48 @@ class DetectionEngineSafetyTests(unittest.TestCase):
         self.assertEqual(alerts[0]["sid"], 900001)
 
 
+class FingerNullRequestTests(unittest.TestCase):
+    """SID 324 content:"|00|" must match a real NUL byte, never an empty payload.
+
+    Regression guard for the PROTOCOL-FINGER null request false positive: a bare
+    TCP SYN to port 79 carries no application data, so it must not satisfy a rule
+    that requires a NUL byte.
+    """
+
+    def engine(self):
+        engine = DetectionEngine.__new__(DetectionEngine)
+        engine.rules = [{
+            "sid": 324,
+            "rev": 12,
+            "protocol": "TCP",
+            "dst_port": 79,
+            "content": "|00|",
+            "message": "PROTOCOL-FINGER null request",
+        }]
+        engine._compiled_rules = engine._compile_rules(engine.rules)
+        engine.unsupported_rules = 0
+        engine._alert_cache = {}
+        return engine
+
+    def packet(self, payload):
+        return {
+            "src_ip": "10.117.198.204",
+            "dst_ip": "10.117.198.62",
+            "protocol": "TCP",
+            "src_port": 63428,
+            "dst_port": 79,
+            "payload": payload,
+            "length": 60,
+        }
+
+    def test_syn_without_payload_is_not_a_finger_null_request(self):
+        self.assertEqual(self.engine().analyze_packet(self.packet(b"")), [])
+
+    def test_genuine_nul_payload_still_matches(self):
+        alerts = self.engine().analyze_packet(self.packet(b"\x00"))
+        self.assertEqual([alert["sid"] for alert in alerts], [324])
+
+
 class DashboardRuleApiTests(unittest.TestCase):
     def test_rule_crud_search_and_authoritative_state(self):
         with tempfile.TemporaryDirectory() as directory:

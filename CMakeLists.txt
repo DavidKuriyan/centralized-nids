@@ -336,4 +336,39 @@ if(DELTA_NIDS_BUILD_TESTS)
     target_link_libraries(delta-nids-vlan-test PRIVATE delta_nids_core)
     target_compile_features(delta-nids-vlan-test PRIVATE cxx_std_17)
     add_test(NAME delta-nids-vlan-test COMMAND delta-nids-vlan-test)
+
+    if(WIN32)
+        set_tests_properties(
+            delta-nids-security-test
+            delta-nids-performance-test
+            delta-nids-evaluation-test
+            delta-nids-pcap-regression-test
+            delta-nids-windows-provider-test
+            delta-nids-version-test
+            delta-nids-platform-test
+            delta-nids-interface-test
+            delta-nids-capture-test
+            delta-nids-packet-test
+            delta-nids-flow-test
+            delta-nids-reassembly-test
+            delta-nids-service-test
+            delta-nids-inspector-test
+            delta-nids-buffer-test
+            delta-nids-rule-test
+            delta-nids-matcher-test
+            delta-nids-detection-test
+            delta-nids-behavioral-test
+            delta-nids-alert-test
+            delta-nids-incident-test
+            delta-nids-storage-test
+            delta-nids-api-test
+            delta-nids-telemetry-test
+            delta-nids-api-integration-test
+            delta-nids-span-test
+            delta-nids-ipv6-test
+            delta-nids-vlan-test
+            PROPERTIES ENVIRONMENT "PATH=C:/Windows/System32/Npcap;$ENV{PATH}"
+        )
+    endif()
 endif()
+

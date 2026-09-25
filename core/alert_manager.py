@@ -61,11 +61,11 @@ def alert_fingerprint(alert: dict, timestamp: int) -> str:
 
     Events that carry an explicit ``event_id`` (behavioral campaigns, correlated
     detections) keep a unique identity per campaign. Events without one
-    (per-packet signature matches such as SSH banner observation) collapse into
-    a single unique alert per event class: the ephemeral source port and any
-    fixed time bucket are excluded so one recurring condition does not create a
-    new alert row for every packet or connection -- occurrence_count and
-    last_seen track how often and how recently it fired.
+    (per-packet signature matches such as SSH banner observation or recurring
+    traffic visibility events) collapse into a single unique alert per event class:
+    the ephemeral source port and any fixed time bucket are excluded so one recurring
+    condition does not create a new alert row for every packet or connection --
+    occurrence_count and last_seen track how often and how recently it fired.
     """
     event_id = alert.get("event_id")
     if event_id is None:
@@ -215,6 +215,8 @@ class AlertManager:
                 logger.error("failed to persist alert: %s", error)
 
     def _persist_incident(self, values: dict) -> None:
+        if str(values.get('severity', '')).upper() == 'INFO':
+            return
         with self._lock:
             try:
                 # Correlate only with an open incident that has an actual

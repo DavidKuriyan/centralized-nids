@@ -126,7 +126,7 @@ class DeltaCore:
     TCP_FLAG_BITS = {"F": 0x01, "S": 0x02, "R": 0x04, "P": 0x08, "A": 0x10, "U": 0x20}
 
     def __init__(self, alert_manager, detection_engine, scan_window: float = 30.0,
-                 port_threshold: int = 8, ping_threshold: int = 5,
+                 port_threshold: int = 8, ping_threshold: int = 30,
                  remote_sweep_threshold: int = 200,
                  remote_sweep_enabled: bool = False,
                  dns_threshold: int = 50, brute_force_threshold: int = 10,
@@ -141,12 +141,14 @@ class DeltaCore:
                  http_banner_grab_threshold: int = 1, http_banner_grab_window: float = 60.0,
                  reverse_shell_min_duration: float = 30.0,
                  connection_idle_timeout: float = 120.0,
-                 correlation_window: float = 600.0):
+                 correlation_window: float = 600.0,
+                 enable_ipv6: bool = False):
         self.alert_manager = alert_manager
         self.detection_engine = detection_engine
         self.scan_window = float(scan_window)
         self.port_threshold = max(2, int(port_threshold))
         self.ping_threshold = max(2, int(ping_threshold))
+        self.enable_ipv6 = bool(enable_ipv6)
         self.remote_sweep_threshold = max(2, int(remote_sweep_threshold))
         self.remote_sweep_enabled = bool(remote_sweep_enabled)
         self.dns_threshold = max(2, int(dns_threshold))
@@ -216,6 +218,9 @@ class DeltaCore:
         # ICMP echo visibility event. Ordinary echo requests are a bounded,
         # low-severity visibility event, not an attack by themselves.
         self._icmp_events: dict[tuple[str, str, str], tuple[float, int]] = {}
+        # (source, destination, protocol) -> sliding window of echo request timestamps
+        # to detect ICMP request floods (>30 requests from one IP to another).
+        self._icmp_flood: dict[tuple[str, str, str], dict[str, Any]] = {}
         # FTP failed-login brute force per (client, server, service port):
         # sliding window of failed authentication timestamps.
         self._ftp_auth: dict[tuple[str, str, int], dict[str, Any]] = {}
@@ -302,6 +307,19 @@ class DeltaCore:
             alert["event_id"] = event_id
         alert.update(extra)
         self.alert_manager.log_alert(alert)
+
+    @staticmethod
+    def _connection_alert_packet(packet: dict, state: dict[str, Any], service_port: int) -> dict:
+        """Orient a connection-scoped alert to the side that initiated it.
+
+        Detectors that fire when a connection closes (brute force, banner
+        grabbing) run on whichever packet completes the session, which is
+        frequently the server's reply. Inheriting that packet's direction
+        names the victim as the alert source, so the client that opened the
+        connection -- the attacker -- is always reported as the source.
+        """
+        return {**packet, "src_ip": state["client_ip"], "dst_ip": state["server_ip"],
+                "src_port": state["client_port"], "dst_port": service_port}
 
     def _evict_oldest(self, coll: dict, cap: int, last_seen_of) -> None:
         """Amortized size-cap eviction for a detector state table.
@@ -477,7 +495,7 @@ class DeltaCore:
                         f"window_seconds={self.ssh_brute_force_window:g}; "
                         f"threshold={self.ssh_brute_force_threshold}; "
                         f"client_source_ports=[{_bounded_list(sorted(distinct))}]")
-            self._alert(packet, 90007, "High",
+            self._alert(self._connection_alert_packet(packet, state, service_port), 90007, "High",
                         f"SSH brute force / repeated authentication attempts from {client} "
                         f"to {server}:{service_port} ({len(distinct)} sessions in "
                         f"{self.ssh_brute_force_window:g}s)",
@@ -513,7 +531,7 @@ class DeltaCore:
                         f"destination={server}; destination_port={service_port}; "
                         f"banner_grabs={len(grabs)}; window_seconds={self.ssh_banner_grab_window:g}; "
                         f"banner_pattern=server_only")
-            self._alert(packet, 90015, "Medium",
+            self._alert(self._connection_alert_packet(packet, state, service_port), 90015, "Medium",
                         f"SSH banner enumeration (netcat-style) from {client} to {server}:{service_port}",
                         evidence=evidence,
                         explanation=("SSH connection received the server banner and closed without "
@@ -604,7 +622,7 @@ class DeltaCore:
                         f"destination={server}; destination_port={service_port}; "
                         f"banner=[{banner_text[:128]}]; version={version or 'not-disclosed'}; "
                         f"banner_grabs={len(grabs)}; window_seconds={self.ftp_enum_window:g}")
-            self._alert(packet, 90008, "Medium",
+            self._alert(self._connection_alert_packet(packet, state, service_port), 90008, "Medium",
                         f"FTP banner/version enumeration (banner grabbing) from {client} "
                         f"to {server}:{service_port}",
                         evidence=evidence,
@@ -663,7 +681,7 @@ class DeltaCore:
                         f"failed_authentication_attempts={len(times)}; "
                         f"window_seconds={self.ftp_brute_force_window:g}; "
                         f"threshold={self.ftp_brute_force_threshold}")
-            self._alert(packet, 90013, "Medium",
+            self._alert(self._connection_alert_packet(packet, state, service_port), 90013, "Medium",
                         f"FTP brute force / repeated failed logins from {client} "
                         f"to {server}:{service_port} ({len(times)} failures in "
                         f"{self.ftp_brute_force_window:g}s)",
@@ -824,10 +842,23 @@ class DeltaCore:
                 self._conns[reverse] = state
                 oriented = False
             elif payload or (flags & 0x04) or (flags & 0x01):
-                # Mid-stream observation: orient from the first data/close packet.
-                state = self._new_connection_state(src, src_port, dst, dst_port, now)
-                self._conns[forward] = state
-                oriented = True
+                # Mid-stream observation: orient using well-known ports and IP scoping
+                src_p = int(src_port)
+                dst_p = int(dst_port)
+                src_is_srv = src_p in COMMON_CLIENT_PORTS and dst_p not in COMMON_CLIENT_PORTS
+                dst_is_srv = dst_p in COMMON_CLIENT_PORTS and src_p not in COMMON_CLIENT_PORTS
+                if src_is_srv and not dst_is_srv:
+                    state = self._new_connection_state(dst, dst_port, src, src_port, now)
+                    self._conns[reverse] = state
+                    oriented = False
+                elif not self._is_private_ip(src) and self._is_private_ip(dst) and not dst_is_srv:
+                    state = self._new_connection_state(dst, dst_port, src, src_port, now)
+                    self._conns[reverse] = state
+                    oriented = False
+                else:
+                    state = self._new_connection_state(src, src_port, dst, dst_port, now)
+                    self._conns[forward] = state
+                    oriented = True
             else:
                 return  # Pure ACK with no connection context is ignored.
         state["last"] = now
@@ -948,11 +979,27 @@ class DeltaCore:
         client_ip = state["client_ip"]
         server_ip = state["server_ip"]
         server_port = int(state.get("syn_port") if state.get("syn_port") is not None else state["server_port"])
+        client_port = int(state.get("client_port", 0) or 0)
+
+        # Orientation correction: if client_port is a standard service port or client is public
+        # while server is private, the observation was inverted.
+        if (not self._is_private_ip(client_ip) and self._is_private_ip(server_ip)) or \
+           (client_port in COMMON_CLIENT_PORTS and server_port not in COMMON_CLIENT_PORTS):
+            client_ip, server_ip = server_ip, client_ip
+            client_port, server_port = server_port, client_port
+            state["client_ip"], state["server_ip"] = client_ip, server_ip
+            state["client_port"], state["server_port"] = client_port, server_port
+
         internal_client = self._is_private_ip(client_ip)
         outbound_public = internal_client and not self._is_private_ip(server_ip)
         unusual_port = server_port not in COMMON_CLIENT_PORTS
+
+        # A reverse shell callback MUST originate from an internal compromised client.
+        if not internal_client:
+            return
+
         pure_protocol_session = state.get("web_payloads", 0) > 0 and state.get("raw_payloads", 0) == 0
-        if pure_protocol_session:
+        if pure_protocol_session or (server_port in (80, 443, 8080, 8443) and not state["shell_hits"] and not state["strong_shell"]):
             # Every payload on the stream is TLS/HTTP framing (web browsing,
             # API traffic, dev servers). A genuine reverse shell speaks a raw
             # interactive protocol, never HTTP/TLS framing, so a pure protocol
@@ -967,10 +1014,9 @@ class DeltaCore:
         strong = state["strong_shell"]
         score = sum((unusual_port, outbound_public, interactive, long_lived, 2 if shell else 0))
         triggered = (
-            (unusual_port and (interactive or long_lived or shell))
-            or (shell and interactive and long_lived)
-            or (strong and unusual_port)
-            or (outbound_public and interactive and shell)
+            (shell and (interactive or long_lived or unusual_port))
+            or (strong and (unusual_port or outbound_public))
+            or (unusual_port and outbound_public and interactive and long_lived and score >= 4 and state.get("raw_payloads", 0) > 5)
         )
         if not triggered:
             return
@@ -1145,6 +1191,10 @@ class DeltaCore:
         client = state["client_ip"]
         server = state["server_ip"]
         service_port = int(state.get("syn_port") if state.get("syn_port") is not None else state["server_port"])
+        # Banner grab is an attacker probing an internal server. Outbound client connections
+        # to external public web servers (e.g. web browsing, package updates) are not banner grabs.
+        if not self._is_private_ip(server):
+            return
         key = (client, server, service_port)
         grab_state = self._http_banner_grabs.setdefault(key, {"grabs": deque(), "emitted": False})
         grabs = grab_state["grabs"]
@@ -1166,7 +1216,8 @@ class DeltaCore:
                         f"banner=[{first_line}]; server_header=[{server_header}]; "
                         f"banner_grabs={len(grabs)}; window_seconds={self.http_banner_grab_window:g}; "
                         f"banner_pattern=server_response_only")
-            self._alert(packet, 90016, "Medium",
+            alert_pkt = self._connection_alert_packet(packet, state, service_port)
+            self._alert(alert_pkt, 90016, "Medium",
                         f"HTTP banner enumeration (netcat-style) from {client} to {server}:{service_port}",
                         evidence=evidence,
                         explanation=("HTTP connection received the server response and closed without "
@@ -1226,28 +1277,40 @@ class DeltaCore:
         destination = packet.get("dst_ip")
         if not source or not destination:
             return
+        if not self.enable_ipv6 and (protocol == "ICMPV6" or ":" in str(source) or ":" in str(destination)):
+            return
 
         if protocol in ("ICMP", "ICMPV6") and packet.get("icmp_type") in (8, 128):
-            # Ordinary ICMP echo requests are not attacks by themselves. Report
-            # each (source, destination, protocol) pair at most once per scan
-            # window as a bounded INFO-level visibility event. Capture-level
-            # duplicates are already removed upstream; repeated real pings
-            # aggregate into one event whose occurrence count grows, so normal
-            # ping traffic cannot flood the alert stream.
-            window_epoch = int(now // self.scan_window)
-            key = (str(source), str(destination), str(protocol))
-            previous = self._icmp_events.get(key)
-            if previous is None or previous[1] != window_epoch:
-                self._icmp_events[key] = (now, window_epoch)
-                self._prune_icmp_events(now)
-                self._alert(packet, 90001, "INFO",
-                            f"{protocol} echo request from {source} to {destination}",
-                            evidence=(f"protocol={protocol}; icmp_type={packet.get('icmp_type')}; "
-                                      f"source={source}; destination={destination}; "
-                                      f"window_seconds={self.scan_window:g}; window_epoch={window_epoch}"),
-                            explanation="captured ICMP echo request visibility event; not by itself an attack",
-                            event_id=f"icmp-request-{source}-{destination}-{window_epoch}",
-                            detection_type="icmp_visibility", confidence=20)
+            # All ICMP echo requests from 1 IP to another are listed under the INFO category.
+            # Repeated pings aggregate into 1 alert row tracking attempts (occurrence_count).
+            self._alert(packet, 90001, "INFO",
+                        f"{protocol} echo request from {source} to {destination}",
+                        evidence=(f"protocol={protocol}; icmp_type={packet.get('icmp_type')}; "
+                                  f"source={source}; destination={destination}; "
+                                  f"window_seconds={self.scan_window:g}"),
+                        explanation="captured ICMP echo request visibility event; not by itself an attack",
+                        detection_type="icmp_visibility", confidence=20)
+
+            # If request limit is above 30+ from 1 IP to another within the scan window,
+            # trigger threat rule (ICMP flood / excessive request rate).
+            flood_key = (str(source), str(destination), str(protocol))
+            flood_state = self._icmp_flood.setdefault(flood_key, {"observations": deque(), "emitted": False})
+            flood_state["observations"].append(now)
+            cutoff = now - self.scan_window
+            while flood_state["observations"] and flood_state["observations"][0] < cutoff:
+                flood_state["observations"].popleft()
+            obs_count = len(flood_state["observations"])
+            if obs_count < 30:
+                flood_state["emitted"] = False
+            elif obs_count >= 30 and not flood_state["emitted"]:
+                flood_state["emitted"] = True
+                self._alert(packet, 90017, "High",
+                            f"{protocol} echo request flood from {source} to {destination} ({obs_count} requests in {self.scan_window:g}s)",
+                            evidence=(f"protocol={protocol}; source={source}; destination={destination}; "
+                                      f"requests={obs_count}; window_seconds={self.scan_window:g}"),
+                            explanation="behavioral ICMP echo request threshold reached (>30 requests from one IP to another)",
+                            event_id=self._next_event_id("icmp-flood"),
+                            detection_type="icmp_flood", confidence=85)
             signature = "echo"
             active = True
         elif protocol == "TCP":
@@ -1765,6 +1828,12 @@ class DeltaCore:
         return False
 
     def process_packet(self, packet):
+        if not self.enable_ipv6:
+            proto = str(packet.get("protocol") or "").upper()
+            src = str(packet.get("src_ip") or "")
+            dst = str(packet.get("dst_ip") or "")
+            if proto == "ICMPV6" or ":" in src or ":" in dst or packet.get("ip_version") == 6:
+                return
         # Rule refresh is synchronized inside DetectionEngine; capture remains
         # the owner of packet ordering and is never stopped for an update.
         refresh = getattr(self.detection_engine, "refresh_if_changed", None)
@@ -1773,10 +1842,13 @@ class DeltaCore:
         with self._lock:
             self.packets_sniffed += 1
             self.total_data += int(packet.get("length", 0) or 0)
-            self.unique_ips.update(filter(None, (packet.get("src_ip"), packet.get("dst_ip"))))
+            for ip in (packet.get("src_ip"), packet.get("dst_ip")):
+                if ip and ":" not in str(ip):
+                    self.unique_ips.add(ip)
             if packet.get("src_ip") and packet.get("dst_ip"):
-                self.flows.add((packet.get("src_ip"), packet.get("src_port"), packet.get("dst_ip"),
-                                packet.get("dst_port"), packet.get("protocol")))
+                if ":" not in str(packet.get("src_ip")) and ":" not in str(packet.get("dst_ip")):
+                    self.flows.add((packet.get("src_ip"), packet.get("src_port"), packet.get("dst_ip"),
+                                    packet.get("dst_port"), packet.get("protocol")))
         traffic_id = self.alert_manager.log_traffic(packet)
         if traffic_id:
             packet["traffic_id"] = traffic_id

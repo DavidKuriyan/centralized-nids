@@ -12,7 +12,7 @@ from typing import Iterable
 from core.rule_management import decode_content, load_port_variables, parse_port_expression
 
 DEDUP_WINDOW_SECONDS = 30.0
-MAX_ALERTS_PER_PACKET = 20
+MAX_ALERTS_PER_PACKET = 2
 LEGACY_HEURISTIC_FIELD = "heuristic_payload"
 SUPPORTED_FIELDS = {
     "sid", "rev", "revision", "action", "protocol", "src_ip", "dst_ip", "src_port", "dst_port",
@@ -238,7 +238,7 @@ class DetectionEngine:
                 content = item["content"]
                 content_values = item.get("contents", [content])
                 haystack = raw_payload.lower() if item["nocase"] else raw_payload
-                # Snort-style content anchoring: `offset` starts the search at
+                # Signature content anchoring: `offset` starts the search at
                 # a fixed byte index and `depth` bounds how many bytes of the
                 # payload are searched from there. Rules without either keep
                 # the historical whole-payload substring semantics.
@@ -256,13 +256,13 @@ class DetectionEngine:
                     continue
                 if item["regex"] and not item["regex"].search(raw_payload):
                     continue
-                # A protocol-only ICMP/ARP rule is a useful, bounded explicit
+                # A protocol-only ICMP/ICMPV6/ARP rule is a bounded explicit
                 # rule primitive. Other empty rules are rejected to avoid
                 # accidental "alert everything" false positives.
-                if not content and not item["regex"] and protocol not in ("ICMP", "ICMPV6", "ARP"):
+                if not content and not item["regex"] and rule_protocol not in ("ICMP", "ICMPV6", "ARP"):
                     continue
                 gid, sid, revision = self._rule_identity(rule)
-                evidence_value = ", ".join(value.decode("utf-8", errors="replace") for value in content_values if value) if content_values else "protocol-only match"
+                evidence_value = ", ".join(value.decode("utf-8", errors="replace") for value in content_values if value) if content_values else "protocol match"
                 evidence = f"protocol={protocol}; payload_match={evidence_value}"
                 fingerprint_material = "|".join(str(value) for value in (
                     gid, sid, revision, packet.get("src_ip"), packet.get("dst_ip"), protocol,
@@ -274,7 +274,6 @@ class DetectionEngine:
                 if now - self._alert_cache.get(key, 0.0) < DEDUP_WINDOW_SECONDS:
                     continue
                 self._alert_cache[key] = now
-                event_id = f"rule-{gid}-{sid}-{revision}-{key[:16]}-{int(now // DEDUP_WINDOW_SECONDS)}"
                 alerts.append({
                     "src_ip": packet.get("src_ip"), "dst_ip": packet.get("dst_ip"),
                     "src_port": packet.get("src_port"), "dst_port": packet.get("dst_port"),
@@ -284,7 +283,6 @@ class DetectionEngine:
                     "message": rule.get("message", f"Rule {sid} matched"),
                     "action": rule.get("action", "ALERT"), "is_ml_anomaly": False,
                     "evidence": evidence,
-                    "event_id": event_id,
                     "explanation": f"rule {sid} matched packet evidence on protocol {protocol}",
                 })
             if len(self._alert_cache) > 10000:
