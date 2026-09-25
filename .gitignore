@@ -1,15 +1,16 @@
-# Virtual Environment
+# Virtual Environments
 venv/
 .venv/
 env/
 ENV/
 
-# Python Cache
+# Python Cache & Bytecode
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
 .pytest_cache/
+.coverage
+htmlcov/
 
 # Databases
 *.db
@@ -17,17 +18,56 @@ __pycache__/
 *.sqlite3
 nids.db
 
-# Environment variables
+# Environment Variables & Secrets
 .env
+.env.*
+!.env.example
 
-# CMake build directories
+# CMake Build Directories & Artifacts
 build/
 build-*/
 build_vs/
 CMakeCache.txt
-cmake-build-*/
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+Testing/
+Makefile
 
-# IDE / Editor settings
+# C/C++ Compiled Binaries & Intermediates
+*.obj
+*.o
+*.lib
+*.a
+*.exp
+*.ilk
+*.pdb
+*.idb
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Visual Studio & IDE Configurations
+.vs/
 .vscode/
 .idea/
 *.swp
+*.swo
+*~
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+
+# Operating System Files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+._*
+
+# Log Files
+*.log

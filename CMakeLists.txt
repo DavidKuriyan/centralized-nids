@@ -35,8 +35,36 @@ if(NOT nlohmann_json_FOUND)
     FetchContent_MakeAvailable(nlohmann_json)
 endif()
 if(NOT PCAP_FOUND)
-    find_path(PCAP_INCLUDE_DIRS NAMES pcap/pcap.h pcap.h HINTS "C:/Users/Admin/Downloads/npcap-sdk-1.16/Include" "C:/Npcap-sdk/Include" "$ENV{NPCAP_SDK}/Include")
-    find_library(PCAP_LIBRARIES NAMES pcap wpcap HINTS "C:/Users/Admin/Downloads/npcap-sdk-1.16/Lib/x64" "C:/Users/Admin/Downloads/npcap-sdk-1.16/Lib" "C:/Npcap-sdk/Lib/x64" "$ENV{NPCAP_SDK}/Lib/x64")
+    find_path(PCAP_INCLUDE_DIRS NAMES pcap/pcap.h pcap.h
+        HINTS
+            "$ENV{NPCAP_SDK}/Include"
+            "$ENV{ProgramFiles}/Npcap SDK/Include"
+            "$ENV{ProgramFiles(x86)}/Npcap SDK/Include"
+            "C:/Npcap-sdk/Include"
+            "C:/Users/Admin/Downloads/npcap-sdk-1.16/Include"
+        PATHS
+            /usr/include
+            /usr/local/include
+            /opt/homebrew/include
+    )
+    find_library(PCAP_LIBRARIES NAMES pcap wpcap
+        HINTS
+            "$ENV{NPCAP_SDK}/Lib/x64"
+            "$ENV{NPCAP_SDK}/Lib"
+            "$ENV{ProgramFiles}/Npcap SDK/Lib/x64"
+            "$ENV{ProgramFiles}/Npcap SDK/Lib"
+            "$ENV{ProgramFiles(x86)}/Npcap SDK/Lib/x64"
+            "$ENV{ProgramFiles(x86)}/Npcap SDK/Lib"
+            "C:/Npcap-sdk/Lib/x64"
+            "C:/Npcap-sdk/Lib"
+            "C:/Users/Admin/Downloads/npcap-sdk-1.16/Lib/x64"
+            "C:/Users/Admin/Downloads/npcap-sdk-1.16/Lib"
+        PATHS
+            /usr/lib
+            /usr/local/lib
+            /usr/lib/x86_64-linux-gnu
+            /opt/homebrew/lib
+    )
     if(PCAP_INCLUDE_DIRS AND PCAP_LIBRARIES)
         set(PCAP_FOUND TRUE)
     endif()
